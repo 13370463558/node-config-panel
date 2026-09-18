@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>节点仓库配置面板</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1e26; --card2:#212734; --border:#2c3444; --text:#e6e9ef; --muted:#8b94a7; --accent:#4c8dff; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; min-height:100vh; }
+  header { padding:20px 28px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:20px; font-weight:600; }
+  header .sub { color:var(--muted); font-size:13px; }
+  button { background:var(--card2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 16px; cursor:pointer; font-size:14px; transition:.15s; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button.primary:hover { filter:brightness(1.1); }
+  button.danger:hover { border-color:var(--err); color:var(--err); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  select, input[type=text] { background:#0d1016; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:14px; outline:none; }
+  select:focus, input[type=text]:focus { border-color:var(--accent); }
+  .wrap { max-width:1200px; margin:0 auto; padding:24px 28px; }
+
+  /* 卡片区 */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; display:flex; flex-direction:column; gap:12px; }
+  .card .name { font-size:16px; font-weight:600; display:flex; align-items:center; gap:8px; }
+  .card .name .dot { width:8px; height:8px; border-radius:50%; }
+  .dot.ok { background:var(--ok); } .dot.no { background:var(--warn); }
+  .card .url { color:var(--muted); font-size:12px; word-break:break-all; }
+  .card .row { display:flex; gap:8px; }
+  .card select { flex:1; }
+  .card .enter { flex:0 0 auto; }
+  .statusline { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  .log { background:#0d1016; border:1px solid var(--border); border-radius:8px; padding:10px; font-family:ui-monospace,Menlo,monospace; font-size:12px; max-height:200px; overflow:auto; white-space:pre-wrap; margin-bottom:16px; display:none; }
+
+  /* 配置区 */
+  .breadcrumb { color:var(--muted); font-size:14px; margin-bottom:16px; }
+  .breadcrumb b { color:var(--text); }
+  .config-layout { display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:start; }
+  @media (max-width:900px){ .config-layout{ grid-template-columns:1fr; } }
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; }
+  .panel h3 { font-size:15px; margin-bottom:12px; }
+  .filebar { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  .filebar select { flex:1; min-width:200px; }
+  .env-table { width:100%; border-collapse:collapse; }
+  .env-table th { text-align:left; color:var(--muted); font-size:12px; padding:6px 8px; border-bottom:1px solid var(--border); }
+  .env-table td { padding:6px 8px; border-bottom:1px solid #232a38; vertical-align:top; }
+  .env-table .k { font-family:ui-monospace,Menlo,monospace; font-weight:600; font-size:13px; white-space:nowrap; }
+  .env-table .cmt { color:var(--muted); font-size:12px; }
+  .env-table input { width:100%; min-width:160px; }
+  .env-table .ro { color:var(--muted); font-size:12px; }
+  .toolbar { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+  .pre { background:#0d1016; border:1px solid var(--border); border-radius:8px; padding:12px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; line-height:1.5; overflow:auto; max-height:70vh; white-space:pre; }
+  .copybar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  .copybar .tip { color:var(--muted); font-size:12px; }
+  textarea.raw { width:100%; background:#0d1016; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; min-height:180px; resize:vertical; }
+  .rawbar { display:flex; gap:8px; margin-top:8px; }
+  .msg { font-size:13px; margin-top:8px; }
+  .msg.err { color:var(--err); } .msg.ok { color:var(--ok); }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛠️ 节点仓库配置面板</h1>
+  <span class="sub">服务端本地编辑，不提交、不推送 — 改完复制内容</span>
+  <div style="flex:1"></div>
+  <button id="btn-init">⚡ 初始化 / 更新仓库</button>
+  <button id="btn-refresh">刷新列表</button>
+</header>
+
+<div class="wrap">
+  <div id="log" class="log"></div>
+
+  <!-- 卡片列表视图 -->
+  <div id="view-cards">
+    <div class="statusline" id="status-line">加载中...</div>
+    <div class="grid" id="cards"></div>
+  </div>
+
+  <!-- 配置编辑视图 -->
+  <div id="view-config" class="hidden">
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <div class="config-layout">
+      <div class="panel">
+        <h3>环境变量</h3>
+        <div class="filebar">
+          <select id="file-select" title="配置文件"></select>
+          <button id="btn-reload-file">刷新文件</button>
+        </div>
+        <table class="env-table">
+          <thead><tr><th>变量</th><th>值</th><th>说明</th></tr></thead>
+          <tbody id="env-body"></tbody>
+        </table>
+        <div class="toolbar">
+          <button id="btn-apply" class="primary">💾 应用修改</button>
+          <button id="btn-reset" class="danger">↩ 重置该文件</button>
+          <button id="btn-back">← 返回列表</button>
+        </div>
+        <div id="apply-msg" class="msg"></div>
+
+        <h3 style="margin-top:18px">原始编辑（备用，绕过表单直接改全文）</h3>
+        <textarea id="raw" class="raw" spellcheck="false"></textarea>
+        <div class="rawbar">
+          <button id="btn-raw-save">保存原始内容</button>
+          <button id="btn-raw-reload">重新载入</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>修改后文件内容</h3>
+        <div class="copybar">
+          <button id="btn-copy" class="primary">📋 复制内容</button>
+          <button id="btn-download">⬇ 下载文件</button>
+          <span class="tip" id="copy-tip"></span>
+        </div>
+        <pre class="pre" id="preview"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { repo:null, branch:null, file:null, files:[], vars:[], content:"" };
+
+async function api(path, opts={}) {
+  const r = await fetch(path, opts);
+  return r.json();
+}
+function esc(s){ const d=document.createElement('div'); d.textContent=s??''; return d.innerHTML; }
+
+/* ---------- 列表视图 ---------- */
+async function loadStatus() {
+  const d = await api('/api/status');
+  if (!d.repos) { $('#status-line').textContent = '获取失败'; return; }
+  const cloned = d.repos.filter(r=>r.cloned).length;
+  $('#status-line').textContent = `共 ${d.repos.length} 个仓库，已克隆 ${cloned} 个。点卡片「进入配置」选择分支。`;
+  $('#cards').innerHTML = '';
+  for (const r of d.repos) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const opts = r.branches.map(b=>`<option value="${esc(b)}">${esc(b)}</option>`).join('');
+    card.innerHTML = `
+      <div class="name"><span class="dot ${r.cloned?'ok':'no'}"></span>${esc(r.name)}</div>
+      <div class="url">${esc(r.url.replace('https://github.com/',''))}</div>
+      <div class="row">
+        <select ${r.cloned?'':'disabled'} title="分支">${r.cloned?opts:'<option>未初始化</option>'}</select>
+        <button class="enter primary" ${r.cloned?'':'disabled'}>进入配置</button>
+      </div>`;
+    card.querySelector('.enter').onclick = () => enterRepo(r.name, card.querySelector('select').value);
+    $('#cards').appendChild(card);
+  }
+}
+
+async function doInit() {
+  const btn = $('#btn-init'); btn.disabled = true; btn.textContent = '初始化中...';
+  $('#log').style.display = 'block';
+  $('#log').textContent = '';
+  const d = await api('/api/init', { method:'POST' });
+  $('#log').textContent = (d.logs||[]).map(l=>`${l.ok?'✅':'❌'} ${l.name}: ${l.msg}`).join('\n');
+  btn.disabled = false; btn.textContent = '⚡ 初始化 / 更新仓库';
+  loadStatus();
+}
+
+/* ---------- 配置视图 ---------- */
+async function enterRepo(repo, branch) {
+  state.repo = repo; state.branch = branch;
+  $('#view-cards').classList.add('hidden');
+  $('#view-config').classList.remove('hidden');
+  $('#breadcrumb').innerHTML = `${esc(repo)} <b>/ ${esc(branch)}</b>`;
+  await reloadBranch();
+}
+
+async function reloadBranch() {
+  $('#apply-msg').textContent = '';
+  const d = await api(`/api/branch?repo=${encodeURIComponent(state.repo)}&branch=${encodeURIComponent(state.branch)}`);
+  if (!d.ok) { alert(d.error||'进入失败'); return; }
+  state.files = d.env_files.map(f=>f.path).concat(d.text_files.filter(t=>!d.env_files.some(e=>e.path===t)));
+  const sel = $('#file-select');
+  sel.innerHTML = '';
+  if (!state.files.length) { $('#env-body').innerHTML = '<tr><td colspan=3 class="ro">未找到文本文件</td></tr>'; return; }
+  for (const f of d.env_files) {
+    const o = document.createElement('option'); o.value = f.path;
+    o.textContent = `📦 ${f.path} (${f.vars.length} 个变量)`;
+    sel.appendChild(o);
+  }
+  for (const f of d.text_files) {
+    if (d.env_files.some(e=>e.path===f)) continue;
+    const o = document.createElement('option'); o.value = f;
+    o.textContent = `📄 ${f}`;
+    sel.appendChild(o);
+  }
+  state.file = d.env_files.length ? d.env_files[0].path : d.text_files[0];
+  sel.value = state.file;
+  await loadFile();
+}
+
+async function loadFile() {
+  state.file = $('#file-select').value;
+  const d = await api(`/api/file?repo=${encodeURIComponent(state.repo)}&branch=${encodeURIComponent(state.branch)}&file=${encodeURIComponent(state.file)}`);
+  if (!d.ok) { $('#env-body').innerHTML = `<tr><td colspan=3 class="ro">${esc(d.error)}</td></tr>`; return; }
+  state.vars = d.vars || [];
+  state.content = d.content;
+  renderEnv();
+  $('#preview').textContent = d.content;
+  $('#raw').value = d.content;
+}
+
+function renderEnv() {
+  const tb = $('#env-body'); tb.innerHTML = '';
+  if (!state.vars.length) { tb.innerHTML = '<tr><td colspan=3 class="ro">该文件未解析到环境变量，可用下方「原始编辑」直接改</td></tr>'; return; }
+  for (const v of state.vars) {
+    const tr = document.createElement('tr');
+    const cur = v.readonly
+      ? `<span class="ro">(表达式/只读)</span>`
+      : `<input type="text" data-key="${esc(v.key)}" value="${esc(v.value)}" placeholder="默认: ${esc(v.value)}">`;
+    tr.innerHTML = `<td class="k">${esc(v.key)}</td><td>${cur}</td><td class="cmt">${esc(v.comment||'')}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+async function doApply() {
+  const values = {};
+  $('#env-body input[data-key]').forEach(inp => { values[inp.dataset.key] = inp.value; });
+  if (!Object.keys(values).length) { $('#apply-msg').className='msg err'; $('#apply-msg').textContent='没有可修改的变量'; return; }
+  const d = await api('/api/apply', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ repo:state.repo, branch:state.branch, file:state.file, values }) });
+  const msg = $('#apply-msg');
+  if (!d.ok) { msg.className='msg err'; msg.textContent=(d.errors||[d.error]).join('; '); return; }
+  state.content = d.content; state.vars = d.vars||[];
+  $('#preview').textContent = d.content;
+  $('#raw').value = d.content;
+  renderEnv();
+  msg.className='msg ok'; msg.textContent='✅ 已写入本地文件（未提交）。';
+}
+
+async function doReset() {
+  if (!confirm('确定丢弃该文件的本地改动，恢复为分支原始内容？')) return;
+  const d = await api('/api/reset', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ repo:state.repo, branch:state.branch, file:state.file }) });
+  if (!d.ok) { $('#apply-msg').className='msg err'; $('#apply-msg').textContent=d.error; return; }
+  state.content = d.content; state.vars = d.vars||[];
+  $('#preview').textContent = d.content; $('#raw').value = d.content;
+  renderEnv();
+  $('#apply-msg').className='msg ok'; $('#apply-msg').textContent='已恢复原始内容。';
+}
+
+async function doRawSave() {
+  const d = await api('/api/raw-save', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ repo:state.repo, branch:state.branch, file:state.file, content: $('#raw').value }) });
+  if (!d.ok) { $('#apply-msg').className='msg err'; $('#apply-msg').textContent=d.error; return; }
+  state.content = d.content; state.vars = d.vars||[];
+  $('#preview').textContent = d.content;
+  renderEnv();
+  $('#apply-msg').className='msg ok'; $('#apply-msg').textContent='✅ 原始内容已保存到本地文件。';
+}
+
+function copyContent() {
+  const txt = $('#preview').textContent;
+  const done = () => { $('#copy-tip').textContent='✅ 已复制'; setTimeout(()=>$('#copy-tip').textContent='', 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(done).catch(()=>fallbackCopy(txt, done));
+  } else fallbackCopy(txt, done);
+}
+function fallbackCopy(txt, done) {
+  const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta);
+  ta.select(); try { document.execCommand('copy'); done(); } catch(e) {}
+  ta.remove();
+}
+function downloadContent() {
+  const blob = new Blob([$('#preview').textContent], { type:'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = state.file.split('/').pop();
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+function backToList() { $('#view-config').classList.add('hidden'); $('#view-cards').classList.remove('hidden'); loadStatus(); }
+
+/* ---------- 绑定 ---------- */
+$('#btn-init').onclick = doInit;
+$('#btn-refresh').onclick = loadStatus;
+$('#file-select').onchange = loadFile;
+$('#btn-reload-file').onclick = loadFile;
+$('#btn-apply').onclick = doApply;
+$('#btn-reset').onclick = doReset;
+$('#btn-raw-save').onclick = doRawSave;
+$('#btn-raw-reload').onclick = () => { $('#raw').value = state.content; };
+$('#btn-copy').onclick = copyContent;
+$('#btn-download').onclick = downloadContent;
+$('#btn-back').onclick = backToList;
+
+loadStatus();
+</script>
+</body>
+</html>

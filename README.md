@@ -1,0 +1,41 @@
+# 节点仓库配置面板
+
+服务端本地编辑节点仓库配置文件的网页工具。**不提交、不 push** —— 初始化时把仓库
+(所有分支) 克隆到服务端本地，网页上选仓库/分支/改环境变量，改动写回本地文件，
+页面显示修改后的完整内容，复制或下载即可。
+
+## 部署 (Render)
+
+1. 把本目录推到一个 GitHub 仓库
+2. Render → New → Web Service → 选择该仓库
+3. 环境:
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120`
+   - (可选) `REPOS_DIR` 指定仓库存放目录，默认 `./repos`
+4. Deploy 后打开页面 → 点「⚡ 初始化 / 更新仓库」→ 等克隆完成 → 选择仓库卡片进入
+
+> Render 免费实例文件系统是临时的：实例重启后仓库会丢，重新点「初始化 / 更新仓库」即可。
+> 想要持久化可以挂 Render Disk（付费）并把 `REPOS_DIR` 指到挂载盘。
+
+## 本地运行
+
+```bash
+pip install -r requirements.txt
+export REPOS_DIR=/绝对路径/你的仓库目录   # 可选, 复用已有克隆
+python app.py
+# 打开 http://localhost:8000
+```
+
+## 加仓库
+
+编辑 `app.py` 顶部的 `REPOS` 列表，加一行 `("仓库名", "git 地址")`。
+
+## 解析规则
+
+| 语言 | 模式 | 说明 |
+|---|---|---|
+| JS/TS | `process.env.X \|\| '默认值'` | 字符串/数字/布尔可改, 表达式只读 |
+| Python | `os.environ.get('X', '默认值')` / `os.getenv(...)` | 同上 |
+| Go | `os.Getenv("X")` | 只读展示, 用「原始编辑」改 |
+
+找不到模式的文件可用「原始编辑」直接改全文。
