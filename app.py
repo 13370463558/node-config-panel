@@ -16,27 +16,164 @@ import os
 import re
 import subprocess
 import json
+from datetime import timedelta
 
-from flask import Flask, request, jsonify, render_template
+from flask import (Flask, request, jsonify, render_template,
+                   session, redirect, url_for)
+from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPOS_DIR = os.environ.get("REPOS_DIR", os.path.join(BASE_DIR, "repos"))
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
+PANEL_FILE = os.path.join(DATA_DIR, "panel.json")
+LOCK_FILE = os.path.join(DATA_DIR, "locks.json")   # 锁定记录: {"repo|branch": {"文件路径": {"VAR": 值}}}
+REPOS_FILE = os.path.join(DATA_DIR, "repos.json")  # 仓库配置: [{name, url, files}]
+DEFAULT_PASSWORD = "admin"
+SESSION_DAYS = 60   # 登录 cookie 有效期: 两个月
 
-# (仓库名, git 地址) — 想加仓库就加一行
-REPOS = [
-    ("nodejs-argo",       "https://github.com/eooce/nodejs-argo.git"),
-    ("python-xray-argo",  "https://github.com/eooce/python-xray-argo.git"),
-    ("serverless-xhttp",  "https://github.com/eooce/serverless-xhttp.git"),
-    ("sbx-native",        "https://github.com/eooce/sbx-native.git"),
-    ("Sing-box",          "https://github.com/eooce/Sing-box.git"),
-    ("node-ws",           "https://github.com/eooce/node-ws.git"),
-    ("python-ws",         "https://github.com/eooce/python-ws.git"),
+# 默认仓库 (首次启动无 repos.json 时使用; 之后可在面板里增删管理)
+REPOS_DEFAULT = [
+    {"name": "nodejs-argo",       "url": "https://github.com/eooce/nodejs-argo.git"},
+    {"name": "python-xray-argo",  "url": "https://github.com/eooce/python-xray-argo.git"},
+    {"name": "serverless-xhttp",  "url": "https://github.com/eooce/serverless-xhttp.git"},
+    {"name": "sbx-native",        "url": "https://github.com/eooce/sbx-native.git"},
+    {"name": "Sing-box",          "url": "https://github.com/eooce/Sing-box.git"},
+    {"name": "node-ws",           "url": "https://github.com/eooce/node-ws.git"},
+    {"name": "python-ws",         "url": "https://github.com/eooce/python-ws.git"},
 ]
+
+
+def load_repos():
+    """读取仓库配置列表 [{name, url, files?}], 无配置时返回默认列表"""
+    if os.path.exists(REPOS_FILE):
+        try:
+            with open(REPOS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list) and data:
+                return data
+        except Exception:
+            pass
+    return list(REPOS_DEFAULT)
+
+
+def save_repos(repos):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(REPOS_FILE, "w", encoding="utf-8") as f:
+        json.dump(repos, f, indent=2, ensure_ascii=False)
+
+
+def get_repo_files(name):
+    """该仓库配置的优先解析文件列表 (多语言仓库手动指定用)"""
+    for r in load_repos():
+        if r.get("name") == name:
+            files = r.get("files") or []
+            return [str(f).strip() for f in files if str(f).strip()]
+    return []
 
 ENV_FILE_EXTS = {".js", ".ts", ".py", ".go", ".php", ".sh", ".java", ".json"}
 TEXT_EXTS = ENV_FILE_EXTS | {".md", ".txt", ".yml", ".yaml", ".toml", ".env", ".conf"}
 
 app = Flask(__name__)
+
+
+# ==================== 认证配置 ====================
+def load_panel_config():
+    """读取/初始化 data/panel.json: {secret_key, password_hash}
+    首次启动自动生成 secret_key, 默认密码 admin
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    cfg = {}
+    if os.path.exists(PANEL_FILE):
+        try:
+            with open(PANEL_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+    changed = False
+    if not cfg.get("secret_key"):
+        cfg["secret_key"] = os.urandom(32).hex()
+        changed = True
+    if not cfg.get("password_hash"):
+        cfg["password_hash"] = generate_password_hash(DEFAULT_PASSWORD)
+        changed = True
+    if changed:
+        save_panel_config(cfg)
+    return cfg
+
+
+def save_panel_config(cfg):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(PANEL_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+def load_locks():
+    """读取锁定记录: {"repo|branch": {"文件路径": {"VAR": 值}}}"""
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_locks(locks):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(LOCK_FILE, "w", encoding="utf-8") as f:
+        json.dump(locks, f, indent=2, ensure_ascii=False)
+
+
+_panel_cfg = load_panel_config()
+app.secret_key = _panel_cfg["secret_key"]
+app.permanent_session_lifetime = timedelta(days=SESSION_DAYS)
+
+
+@app.before_request
+def require_login():
+    """除登录页和静态文件外, 全部页面/API 都需要登录"""
+    if request.path == "/login" or request.path.startswith("/static"):
+        return None
+    if not session.get("logged_in"):
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "未登录"}), 401
+        return redirect(url_for("login"))
+    return None
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if session.get("logged_in"):
+        return redirect(url_for("index"))
+    if request.method == "POST":
+        pw = request.form.get("password", "")
+        if check_password_hash(load_panel_config()["password_hash"], pw):
+            session.permanent = True
+            session["logged_in"] = True
+            return redirect(url_for("index"))
+        return render_template("login.html", error="密码错误"), 401
+    return render_template("login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/api/change-password", methods=["POST"])
+def api_change_password():
+    data = request.get_json(force=True) or {}
+    old = data.get("old_password", "")
+    new = data.get("new_password", "")
+    cfg = load_panel_config()
+    if not check_password_hash(cfg["password_hash"], old):
+        return jsonify({"ok": False, "error": "原密码错误"})
+    if len(new) < 4:
+        return jsonify({"ok": False, "error": "新密码至少 4 位"})
+    cfg["password_hash"] = generate_password_hash(new)
+    save_panel_config(cfg)
+    return jsonify({"ok": True, "msg": "密码已修改"})
 
 
 # ==================== git 工具 ====================
@@ -77,10 +214,22 @@ def list_branches(name):
 
 
 def checkout_branch(name, branch):
-    """切到指定分支 (detached), 丢弃工作区改动"""
+    """切到指定分支 (detached)。
+
+    优先切到本地 panel-<branch> 分支 (含面板锁定写回的 commit, 不 push);
+    若当前 HEAD 已在该分支 -> 跳过 checkout, 保留工作区改动
+    (用户锁定写入的本地值不能被 git checkout 冲掉);
+    切换分支时才强制 checkout 丢弃上一个分支的改动。
+    """
     rdir = repo_dir(name)
-    # 先丢弃本地改动, 再切分支, 避免 dirty 时 checkout 失败
-    run_git(rdir, "checkout", "-f", "--detach", f"origin/{branch}", timeout=180)
+    local = f"panel-{branch}"
+    rc_l, _, _ = run_git(rdir, "rev-parse", "--verify", local)
+    ref = local if rc_l == 0 else f"origin/{branch}"
+    rc, head, _ = run_git(rdir, "rev-parse", "HEAD")
+    rc2, remote, _ = run_git(rdir, "rev-parse", ref)
+    if rc == 0 and rc2 == 0 and head.strip() == remote.strip():
+        return head.strip()
+    run_git(rdir, "checkout", "-f", "--detach", ref, timeout=180)
     return run_git(rdir, "rev-parse", "--short", "HEAD")[1].strip()
 
 
@@ -260,7 +409,8 @@ def parse_file(path):
 
 def apply_values(content, items, values, ext=""):
     """把 values {key: new_value} 写回 content; items 为 parse_file 返回的条目
-    返回 (新内容, 错误列表, 更新后的条目列表)
+    返回 (新内容, 错误列表, 更新后的条目列表, 高亮区间列表)
+    高亮区间 = 替换后的 token 在最终内容中的 [start, end)
     """
     errors = []
     replacements = []  # (start, end, new_token)
@@ -273,6 +423,9 @@ def apply_values(content, items, values, ext=""):
         new_val = values[key]
         if isinstance(new_val, str):
             new_val = new_val.strip()
+        # 值未变化 -> 跳过, 不产生替换和高亮
+        if str(new_val) == str(it["value"]):
+            continue
         start, end = it["span"]
         if it["kind"] == "string":
             q = it["quote"] or "'"
@@ -290,12 +443,20 @@ def apply_values(content, items, values, ext=""):
                 continue
             replacements.append((start, end, low))
     # 从后往前替换, 避免偏移错乱
+    # 高亮区间: 按原始 start 升序遍历, 累加前面替换造成的长度偏移
+    modified = []
+    offset = 0
+    for start, end, new_token in sorted(replacements):
+        final_start = start + offset
+        offset += len(new_token) - (end - start)
+        modified.append([final_start, final_start + len(new_token)])
+    modified.sort()
     for start, end, new_token in sorted(replacements, reverse=True):
         content = content[:start] + new_token + content[end:]
 
     # 重新解析, 返回最新条目
     items_new, _ = parse_content_string(content, ext)
-    return content, errors, items_new
+    return content, errors, items_new, modified
 
 
 def parse_content_string(content, ext):
@@ -382,10 +543,13 @@ def scan_env_files(name, branch):
                 items, _ = parse_file(full)
                 if items:
                     env_files.append({"path": rel, "vars": items})
-    # 排序: 环境变量文件优先, 且靠根目录的优先
+    # 排序: 仓库手动配置的优先解析文件 > 常见配置文件名 > 其他; 同级别靠根目录优先
+    pref = get_repo_files(name)
     def rank(f):
         depth = f["path"].count("/")
-        return (0 if f["path"].endswith(("index.js", "app.js", "app.py", "index.ts", "main.go", "deno.ts")) else 1, depth)
+        pri = 0 if f["path"] in pref else (
+            1 if f["path"].endswith(("index.js", "app.js", "app.py", "index.ts", "main.go", "deno.ts")) else 2)
+        return (pri, depth)
     env_files.sort(key=rank)
     text_files.sort()
     return env_files, text_files
@@ -419,9 +583,10 @@ def index():
 @app.route("/api/status")
 def api_status():
     result = []
-    for name, url in REPOS:
+    for r in load_repos():
+        name = r["name"]
         branches = list_branches(name) if is_cloned(name) else []
-        result.append({"name": name, "url": url, "cloned": is_cloned(name), "branches": branches})
+        result.append({"name": name, "url": r["url"], "cloned": is_cloned(name), "branches": branches})
     return jsonify({"repos": result})
 
 
@@ -429,10 +594,82 @@ def api_status():
 def api_init():
     os.makedirs(REPOS_DIR, exist_ok=True)
     logs = []
-    for name, url in REPOS:
+    for r in load_repos():
+        name, url = r["name"], r["url"]
         ok, msg = clone_repo(name, url)
         logs.append({"name": name, "ok": ok, "msg": msg})
     return jsonify({"logs": logs})
+
+
+@app.route("/api/repos-config", methods=["GET"])
+def api_repos_config():
+    return jsonify({"ok": True, "repos": load_repos()})
+
+
+@app.route("/api/repos-config", methods=["POST"])
+def api_repos_config_save():
+    data = request.get_json(force=True) or {}
+    repos = data.get("repos") or []
+    clean = []
+    for r in repos:
+        name = str(r.get("name", "")).strip()
+        url = str(r.get("url", "")).strip()
+        files = r.get("files") or []
+        if isinstance(files, str):
+            files = [x.strip() for x in files.split(",") if x.strip()]
+        files = [str(f).strip() for f in files if str(f).strip()]
+        if name and url:
+            clean.append({"name": name, "url": url, "files": files})
+    save_repos(clean)
+    return jsonify({"ok": True, "repos": clean})
+
+
+@app.route("/api/update", methods=["POST"])
+def api_update():
+    """更新单个仓库到最新, 并把锁定过的变量值重新写回文件。
+
+    每个有锁定的分支: 重置到本地 panel-<branch> (指向远端最新) ->
+    应用锁定值写文件 -> 本地 commit (不 push)。切分支不丢锁定值。
+    """
+    data = request.get_json(force=True) or {}
+    name = data.get("repo", "")
+    if not is_cloned(name):
+        return jsonify({"ok": False, "error": "仓库未克隆, 先初始化"})
+    rc, _, err = run_git(repo_dir(name), "fetch", "origin", "--prune", timeout=300)
+    if rc != 0:
+        return jsonify({"ok": False, "error": f"fetch 失败: {err[:200]}"})
+
+    branches = list_branches(name)
+    locks = load_locks()
+    applied = []
+    for br in branches:
+        rdir = repo_dir(name)
+        # 强制切到本地 panel-<branch> (重置为远端最新)
+        run_git(rdir, "checkout", "-f", "-B", f"panel-{br}", f"origin/{br}", timeout=180)
+        for rel, kv in (locks.get(f"{name}|{br}") or {}).items():
+            try:
+                full = os.path.join(rdir, rel)
+                content = read_file_text(name, rel)
+                items, _ = parse_file(full)
+                new_content, errors, _, _ = apply_values(
+                    content, items, kv, os.path.splitext(rel)[1].lower())
+                if errors:
+                    applied.append(f"⏭️ {br}/{rel}: {errors[0]}")
+                    continue
+                write_file_text(name, rel, new_content)
+                applied.append(f"✅ {br}/{rel}: " + ", ".join(f"{k}={v}" for k, v in kv.items()))
+            except Exception as e:
+                applied.append(f"⚠️ {br}/{rel}: {e}")
+        # 有改动就本地 commit (不 push), 防止切分支丢失锁定值
+        rc_s, out_s, _ = run_git(rdir, "status", "--porcelain")
+        if rc_s == 0 and out_s.strip():
+            run_git(rdir, "add", "-A")
+            rc_c, _, err_c = run_git(rdir, "-c", "user.name=panel",
+                                     "-c", "user.email=panel@local",
+                                     "commit", "-m", "panel: apply locked values")
+            if rc_c != 0:
+                applied.append(f"⚠️ {br}: 本地 commit 失败 ({err_c.strip()[:100]})")
+    return jsonify({"ok": True, "branches": branches, "applied": applied})
 
 
 @app.route("/api/branch")
@@ -462,41 +699,38 @@ def api_file():
 
 @app.route("/api/apply", methods=["POST"])
 def api_apply():
+    """替换变量默认值: write=false 纯预览(不写文件), write=true 写入本地文件。
+    不 checkout, 只改单个文件, 避免 partial clone 卡顿。"""
     data = request.get_json(force=True)
     name, branch, rel = data.get("repo", ""), data.get("branch", ""), data.get("file", "")
     values = data.get("values", {}) or {}
-    checkout_branch(name, branch)
+    write = bool(data.get("write", False))
     try:
         content = read_file_text(name, rel)
         full = os.path.join(repo_dir(name), rel)
         items, _ = parse_file(full)
-        new_content, errors, items_new = apply_values(content, items, values, os.path.splitext(rel)[1].lower())
+        new_content, errors, items_new, modified = apply_values(
+            content, items, values, os.path.splitext(rel)[1].lower())
         if errors:
             return jsonify({"ok": False, "errors": errors})
-        write_file_text(name, rel, new_content)
-        return jsonify({"ok": True, "content": new_content, "vars": items_new})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
-
-
-@app.route("/api/raw-save", methods=["POST"])
-def api_raw_save():
-    data = request.get_json(force=True)
-    name, branch, rel = data.get("repo", ""), data.get("branch", ""), data.get("file", "")
-    content = data.get("content", "")
-    checkout_branch(name, branch)
-    try:
-        write_file_text(name, rel, content)
-        full = os.path.join(repo_dir(name), rel)
-        items, _ = parse_file(full)
-        return jsonify({"ok": True, "content": content, "vars": items})
+        if write:
+            write_file_text(name, rel, new_content)
+            # 记录锁定值 (更新仓库后用于写回)
+            locks = load_locks()
+            key = f"{name}|{branch}"
+            locks.setdefault(key, {}).setdefault(rel, {}).update(values)
+            save_locks(locks)
+        return jsonify({"ok": True, "content": new_content, "vars": items_new,
+                        "modified": modified, "saved": write})
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "文件不存在, 请先进入该分支再试"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    """丢弃该文件的本地改动, 恢复为分支原始内容"""
+    """(保留) 丢弃该文件的本地改动, 恢复为分支原始内容"""
     data = request.get_json(force=True)
     name, branch, rel = data.get("repo", ""), data.get("branch", ""), data.get("file", "")
     checkout_branch(name, branch)
@@ -509,6 +743,59 @@ def api_reset():
         return jsonify({"ok": True, "content": content, "vars": items})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/obfuscate-python", methods=["POST"])
+def api_obfuscate_python():
+    """Python 代码混淆 (与 obf.eooce.com 同款: zlib 压缩 -> base64 -> 反转 -> exec)
+
+    纯本地实现, 不依赖外部接口。压缩级别 9 (最大压缩, 与线上输出更接近)。
+    """
+    import zlib
+    import base64
+    data = request.get_json(force=True) or {}
+    code = data.get("code", "")
+    if not code.strip():
+        return jsonify({"ok": False, "error": "代码为空"})
+    compressed = zlib.compress(code.encode("utf-8"), 9)
+    b64 = base64.b64encode(compressed)
+    rev = b64[::-1].decode("ascii")
+    obfuscated = ("_ = (lambda __: __import__('zlib').decompress(__import__('base64').b64decode(__[::-1]))); "
+                  f"exec(_('{rev}'))")
+    return jsonify({"ok": True, "obfuscated": obfuscated,
+                    "original_len": len(code), "obfuscated_len": len(obfuscated)})
+
+
+@app.route("/api/download-obfuscated", methods=["POST"])
+def api_download_obfuscated():
+    """打包混淆结果压缩包: 仅含 混淆后的文件 + 该分支的依赖文件 (requirements.txt / package.json)"""
+    import io
+    import zipfile
+    from flask import Response
+    data = request.get_json(force=True) or {}
+    name, branch, rel = data.get("repo", ""), data.get("branch", ""), data.get("file", "")
+    obf = data.get("code", "")
+    if not obf.strip():
+        return jsonify({"ok": False, "error": "混淆结果为空"})
+    checkout_branch(name, branch)   # HEAD 相同则跳过, 不丢锁定值
+    rdir = repo_dir(name)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 1) 混淆后的文件 (保持原文件名)
+        zf.writestr(rel.split("/")[-1], obf)
+        # 2) 该分支的依赖文件 (存在才加)
+        for dep in ("requirements.txt", "package.json"):
+            full = os.path.join(rdir, dep)
+            if os.path.isfile(full):
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as f:
+                        zf.writestr(dep, f.read())
+                except Exception:
+                    pass
+    buf.seek(0)
+    fname = f"{name}-{branch.replace('/', '_')}-obfuscated.zip"
+    return Response(buf.getvalue(), mimetype="application/zip",
+                    headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
 if __name__ == "__main__":

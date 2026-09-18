@@ -50,15 +50,44 @@
   .env-table .cmt { color:var(--muted); font-size:12px; }
   .env-table input { width:100%; min-width:160px; }
   .env-table .ro { color:var(--muted); font-size:12px; }
+  .valcell { display:flex; gap:6px; align-items:center; }
+  .valcell input { flex:1; min-width:150px; }
+  .valcell .lock, .valcell .uuid-refresh { flex:0 0 auto; padding:7px 10px; font-size:13px; }
+  .valcell .lock:hover { border-color:var(--warn); }
+  .valcell .uuid-refresh:hover { border-color:var(--accent); }
+  .valcell input::placeholder { color:#5c6678; font-size:12px; }
   .toolbar { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
-  .pre { background:#0d1016; border:1px solid var(--border); border-radius:8px; padding:12px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; line-height:1.5; overflow:auto; max-height:70vh; white-space:pre; }
+  .pre { background:#0d1016; border:1px solid var(--border); border-radius:8px; padding:12px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; line-height:1.5; overflow:auto; max-height:70vh; white-space:pre-wrap; word-break:break-word; user-select:text; }
   .copybar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
   .copybar .tip { color:var(--muted); font-size:12px; }
+  mark.hl { background:#f0b429; color:#111; border-radius:2px; padding:0 1px; }
+  .obfbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  .obfbar select { flex:0 0 auto; }
   textarea.raw { width:100%; background:#0d1016; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; min-height:180px; resize:vertical; }
   .rawbar { display:flex; gap:8px; margin-top:8px; }
   .msg { font-size:13px; margin-top:8px; }
   .msg.err { color:var(--err); } .msg.ok { color:var(--ok); }
   .hidden { display:none !important; }
+
+  /* 修改密码弹窗 */
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:100; }
+  .modal { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:24px; width:320px; }
+  .modal h3 { font-size:15px; margin-bottom:14px; }
+  .modal input { width:100%; background:#0d1016; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:14px; margin-bottom:10px; outline:none; }
+  .modal input:focus { border-color:var(--accent); }
+  .modal .row { display:flex; gap:8px; justify-content:flex-end; }
+
+  /* 仓库管理 */
+  .repo-hint { color:var(--muted); font-size:12px; margin-bottom:10px; line-height:1.6; }
+  .repo-row { display:grid; grid-template-columns:150px 1fr 1fr 32px; gap:6px; margin-bottom:6px; align-items:center; }
+  .repo-row input { width:100%; background:#0d1016; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 8px; font-size:13px; outline:none; }
+  .repo-row input:focus { border-color:var(--accent); }
+  .repo-row .rm { background:none; border:none; color:var(--err); cursor:pointer; font-size:16px; }
+
+  /* 编辑界面隐藏主页操作按钮 */
+  body.in-config #btn-pw, body.in-config a[href="/logout"],
+  body.in-config #btn-init, body.in-config #btn-refresh,
+  body.in-config #btn-repos { display:none; }
 </style>
 </head>
 <body>
@@ -66,12 +95,48 @@
   <h1>🛠️ 节点仓库配置面板</h1>
   <span class="sub">服务端本地编辑，不提交、不推送 — 改完复制内容</span>
   <div style="flex:1"></div>
+  <button id="btn-pw">🔑 修改密码</button>
+  <a href="/logout" style="text-decoration:none"><button>退出</button></a>
+  <button id="btn-repos">📚 仓库管理</button>
   <button id="btn-init">⚡ 初始化 / 更新仓库</button>
   <button id="btn-refresh">刷新列表</button>
 </header>
 
 <div class="wrap">
   <div id="log" class="log"></div>
+
+  <!-- 修改密码弹窗 -->
+  <div id="pw-modal" class="modal-bg hidden">
+    <div class="modal">
+      <h3>🔑 修改密码</h3>
+      <input type="password" id="pw-old" placeholder="原密码" autocomplete="current-password">
+      <input type="password" id="pw-new" placeholder="新密码 (至少 4 位)" autocomplete="new-password">
+      <input type="password" id="pw-new2" placeholder="确认新密码" autocomplete="new-password">
+      <div id="pw-msg" class="msg"></div>
+      <div class="row">
+        <button id="btn-pw-cancel">取消</button>
+        <button id="btn-pw-save" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 仓库管理弹窗 -->
+  <div id="repo-modal" class="modal-bg hidden">
+    <div class="modal" style="width:720px;max-width:94vw">
+      <h3>📚 仓库管理</h3>
+      <div class="repo-hint">新仓库保存后点「⚡ 初始化 / 更新仓库」克隆。会自动扫描 env 文件；
+        解析不了的文件走「原始编辑」。多语言仓库可手动指定「优先解析文件」（逗号分隔），
+        如 <code>nodejs/index.js, nodejs/app.js</code>。</div>
+      <div id="repo-rows"></div>
+      <div class="toolbar" style="margin-top:10px">
+        <button id="btn-repo-add">＋ 添加仓库</button>
+        <div style="flex:1"></div>
+        <button id="btn-repo-cancel">取消</button>
+        <button id="btn-repo-save" class="primary">💾 保存</button>
+      </div>
+      <div id="repo-msg" class="msg"></div>
+    </div>
+  </div>
 
   <!-- 卡片列表视图 -->
   <div id="view-cards">
@@ -90,26 +155,17 @@
           <button id="btn-reload-file">刷新文件</button>
         </div>
         <table class="env-table">
-          <thead><tr><th>变量</th><th>值</th><th>说明</th></tr></thead>
+          <thead><tr><th>变量</th><th>值 (提示在框内, 🔒 锁定=写入本地文件)</th></tr></thead>
           <tbody id="env-body"></tbody>
         </table>
         <div class="toolbar">
-          <button id="btn-apply" class="primary">💾 应用修改</button>
-          <button id="btn-reset" class="danger">↩ 重置该文件</button>
           <button id="btn-back">← 返回列表</button>
         </div>
         <div id="apply-msg" class="msg"></div>
-
-        <h3 style="margin-top:18px">原始编辑（备用，绕过表单直接改全文）</h3>
-        <textarea id="raw" class="raw" spellcheck="false"></textarea>
-        <div class="rawbar">
-          <button id="btn-raw-save">保存原始内容</button>
-          <button id="btn-raw-reload">重新载入</button>
-        </div>
       </div>
 
       <div class="panel">
-        <h3>修改后文件内容</h3>
+        <h3>修改后文件内容（改动处黄色高亮）</h3>
         <div class="copybar">
           <button id="btn-copy" class="primary">📋 复制内容</button>
           <button id="btn-download">⬇ 下载文件</button>
@@ -117,16 +173,36 @@
         </div>
         <pre class="pre" id="preview"></pre>
       </div>
+
+      <div class="panel" style="margin-top:20px">
+        <h3>🧊 代码混淆（本地执行，与 js-obfuscator 同款）</h3>
+        <div class="obfbar">
+          <select id="obf-preset">
+            <option value="default">默认 (高性能)</option>
+            <option value="low-obfuscation">低混淆 (高性能)</option>
+            <option value="medium-obfuscation" selected>中等混淆 (性能均衡)</option>
+            <option value="high-obfuscation">高混淆 (低性能)</option>
+          </select>
+          <button id="btn-obf" class="primary">🧊 混淆当前内容</button>
+          <button id="btn-obf-copy">📋 复制混淆结果</button>
+          <button id="btn-obf-download">⬇ 下载压缩包</button>
+          <span class="tip" id="obf-mode-tip"></span>
+        </div>
+        <div id="obf-msg" class="msg"></div>
+        <pre class="pre" id="obf-output" style="max-height:45vh">（点「混淆当前内容」后结果显示在这里，混淆对象是右侧修改后的完整文件）</pre>
+      </div>
     </div>
   </div>
 </div>
 
 <script>
 const $ = (s) => document.querySelector(s);
-const state = { repo:null, branch:null, file:null, files:[], vars:[], content:"" };
+const $$ = (s) => document.querySelectorAll(s);
+const state = { repo:null, branch:null, file:null, files:[], vars:[], content:"", uuidValue:{}, dirty:{} };
 
 async function api(path, opts={}) {
   const r = await fetch(path, opts);
+  if (r.status === 401) { location.href = '/login'; throw new Error('未登录'); }
   return r.json();
 }
 function esc(s){ const d=document.createElement('div'); d.textContent=s??''; return d.innerHTML; }
@@ -148,8 +224,25 @@ async function loadStatus() {
       <div class="row">
         <select ${r.cloned?'':'disabled'} title="分支">${r.cloned?opts:'<option>未初始化</option>'}</select>
         <button class="enter primary" ${r.cloned?'':'disabled'}>进入配置</button>
+        <button class="update" ${r.cloned?'':'disabled'} title="更新仓库到最新并写回锁定值">更新</button>
       </div>`;
-    card.querySelector('.enter').onclick = () => enterRepo(r.name, card.querySelector('select').value);
+    const sel = card.querySelector('select');
+    const pref = getBranchPref(r.name);
+    if (r.cloned && pref && r.branches.includes(pref)) sel.value = pref;   // 默认上次分支
+    sel.onchange = () => saveBranchPref(r.name, sel.value);
+    card.querySelector('.enter').onclick = () => enterRepo(r.name, sel.value);
+    card.querySelector('.update').onclick = async () => {
+      const btn = card.querySelector('.update');
+      btn.disabled = true; btn.textContent = '更新中...';
+      const d = await api('/api/update', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ repo: r.name }) });
+      btn.disabled = false; btn.textContent = '更新';
+      if (!d.ok) { alert(d.error || '更新失败'); return; }
+      const applied = d.applied || [];
+      alert(`✅ ${r.name} 已更新 (${d.branches.length} 个分支)\n\n` +
+        (applied.length ? '🔒 锁定值已写回:\n' + applied.join('\n') : '（该仓库无锁定值）'));
+      loadStatus();
+    };
     $('#cards').appendChild(card);
   }
 }
@@ -164,14 +257,51 @@ async function doInit() {
   loadStatus();
 }
 
-/* ---------- 配置视图 ---------- */
-async function enterRepo(repo, branch) {
+/* ---------- 分支偏好 (localStorage) ---------- */
+const BRANCH_KEY = 'panel_branch_pref';
+function getBranchPref(repo) {
+  try { const o = JSON.parse(localStorage.getItem(BRANCH_KEY)||'{}'); return o[repo]||''; } catch(e){ return ''; }
+}
+function saveBranchPref(repo, branch) {
+  try { const o = JSON.parse(localStorage.getItem(BRANCH_KEY)||'{}'); o[repo]=branch; localStorage.setItem(BRANCH_KEY, JSON.stringify(o)); } catch(e){}
+}
+
+/* ---------- 配置视图 + hash 路由 (#/ 列表, #/config/仓库/分支) ----------
+   用 hash 路由让浏览器返回键在页面内跳转, 手机端返回不会退出网页 */
+function parseRoute() {
+  const m = location.hash.match(/^#\/config\/([^/]+)\/(.+)$/);
+  if (m) return { repo: decodeURIComponent(m[1]), branch: decodeURIComponent(m[2]) };
+  return null;
+}
+function showList() {
+  document.body.classList.remove('in-config');
+  $('#view-config').classList.add('hidden');
+  $('#view-cards').classList.remove('hidden');
+  loadStatus();
+}
+async function showConfig(repo, branch) {
+  document.body.classList.add('in-config');
   state.repo = repo; state.branch = branch;
   $('#view-cards').classList.add('hidden');
   $('#view-config').classList.remove('hidden');
   $('#breadcrumb').innerHTML = `${esc(repo)} <b>/ ${esc(branch)}</b>`;
   await reloadBranch();
 }
+function enterRepo(repo, branch) {
+  saveBranchPref(repo, branch);
+  const target = '#/config/' + encodeURIComponent(repo) + '/' + encodeURIComponent(branch);
+  if (location.hash === target) showConfig(repo, branch);
+  else location.hash = target;   // 触发 hashchange -> showConfig
+}
+function backToList() {
+  if (location.hash && location.hash !== '#/') location.hash = '#/';
+  else showList();
+}
+window.addEventListener('hashchange', () => {
+  const r = parseRoute();
+  if (r) showConfig(r.repo, r.branch);
+  else showList();
+});
 
 async function reloadBranch() {
   $('#apply-msg').textContent = '';
@@ -199,62 +329,202 @@ async function reloadBranch() {
 
 async function loadFile() {
   state.file = $('#file-select').value;
+  state.uuidValue = {};   // 本次文件会话的 UUID 显示值 (重新加载即重置)
+  state.dirty = {};       // 用户改动过的变量 (只有这些参与预览替换/高亮)
   const d = await api(`/api/file?repo=${encodeURIComponent(state.repo)}&branch=${encodeURIComponent(state.branch)}&file=${encodeURIComponent(state.file)}`);
-  if (!d.ok) { $('#env-body').innerHTML = `<tr><td colspan=3 class="ro">${esc(d.error)}</td></tr>`; return; }
+  if (!d.ok) { $('#env-body').innerHTML = `<tr><td colspan=2 class="ro">${esc(d.error)}</td></tr>`; return; }
   state.vars = d.vars || [];
   state.content = d.content;
   renderEnv();
-  $('#preview').textContent = d.content;
-  $('#raw').value = d.content;
+  renderPreview(d.content, []);
+  const ext = (state.file.split('.').pop() || '').toLowerCase();
+  const isPy = ext === 'py';
+  const isJS = ['js','ts','cjs','mjs'].includes(ext);
+  // 预设只对 JS 有效; Python 混淆无预设, 隐藏下拉
+  $('#obf-preset').style.display = isJS ? '' : 'none';
+  $('#obf-mode-tip').textContent = isPy ? '当前: 🐍 Python 混淆（无预设）'
+    : (isJS ? '当前: 🟨 JS 混淆' : `当前: .${ext} 暂不支持混淆`);
+  // 切换文件后清空上次的混淆结果
+  $('#obf-output').textContent = '（点「混淆当前内容」后结果显示在这里，混淆对象是右侧修改后的完整文件）';
+  $('#obf-msg').textContent = '';
+}
+
+/* 预览渲染: 纯文本 + 高亮改动区间 */
+function renderPreview(content, mods) {
+  if (!mods || !mods.length) { $('#preview').textContent = content; return; }
+  let html = '', pos = 0;
+  for (const m of mods) {
+    html += esc(content.slice(pos, m[0]));
+    html += '<mark class="hl">' + esc(content.slice(m[0], m[1])) + '</mark>';
+    pos = m[1];
+  }
+  html += esc(content.slice(pos));
+  $('#preview').innerHTML = html;
+}
+
+/* 实时预览: 输入变化 250ms 后自动计算 (不写文件) */
+let previewTimer = null;
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(updatePreview, 250);
+}
+async function updatePreview() {
+  const values = {};
+  // 只收集用户改动过的变量 (dirty), 没改的不参与替换, 不高亮
+  $$('#env-body input[data-key]').forEach(inp => { if (state.dirty[inp.dataset.key]) values[inp.dataset.key] = inp.value; });
+  if (!Object.keys(values).length) { renderPreview(state.content, []); return; }
+  const d = await api('/api/apply', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ repo:state.repo, branch:state.branch, file:state.file, values }) });
+  if (!d.ok) return;
+  state.content = d.content; state.vars = d.vars||[];
+  renderPreview(d.content, d.modified||[]);
+}
+
+function genUUID() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8);
+    return v.toString(16);
+  });
 }
 
 function renderEnv() {
   const tb = $('#env-body'); tb.innerHTML = '';
-  if (!state.vars.length) { tb.innerHTML = '<tr><td colspan=3 class="ro">该文件未解析到环境变量，可用下方「原始编辑」直接改</td></tr>'; return; }
+  if (!state.vars.length) { tb.innerHTML = '<tr><td colspan=2 class="ro">该文件未解析到环境变量</td></tr>'; return; }
   for (const v of state.vars) {
     const tr = document.createElement('tr');
-    const cur = v.readonly
-      ? `<span class="ro">(表达式/只读)</span>`
-      : `<input type="text" data-key="${esc(v.key)}" value="${esc(v.value)}" placeholder="默认: ${esc(v.value)}">`;
-    tr.innerHTML = `<td class="k">${esc(v.key)}</td><td>${cur}</td><td class="cmt">${esc(v.comment||'')}</td>`;
+    if (v.readonly) {
+      tr.innerHTML = `<td class="k">${esc(v.key)}</td><td><span class="ro">(表达式/只读)</span></td>`;
+      tb.appendChild(tr);
+      continue;
+    }
+    // 注释作为输入框内提示
+    const hint = (v.comment || '').trim() || ('默认: ' + v.value);
+    let display = v.value;
+    if (v.key === 'UUID') {
+      if (state.uuidValue[v.key]) display = state.uuidValue[v.key];
+      else { display = genUUID(); state.uuidValue[v.key] = display; }
+      state.dirty[v.key] = true;   // 随机 UUID 是新值, 参与预览替换
+    }
+    const refreshBtn = (v.key === 'UUID')
+      ? `<button class="uuid-refresh" data-key="${esc(v.key)}" title="重新生成 UUID">🔄</button>` : '';
+    const cell = `
+      <div class="valcell">
+        <input type="text" data-key="${esc(v.key)}" value="${esc(display)}" placeholder="${esc(hint)}">
+        <button class="lock" data-key="${esc(v.key)}" title="锁定此分支下该变量的值为当前输入值 (写入本地文件)">🔒</button>
+        ${refreshBtn}
+      </div>`;
+    tr.innerHTML = `<td class="k">${esc(v.key)}</td><td>${cell}</td>`;
     tb.appendChild(tr);
   }
 }
 
-async function doApply() {
-  const values = {};
-  $('#env-body input[data-key]').forEach(inp => { values[inp.dataset.key] = inp.value; });
-  if (!Object.keys(values).length) { $('#apply-msg').className='msg err'; $('#apply-msg').textContent='没有可修改的变量'; return; }
-  const d = await api('/api/apply', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ repo:state.repo, branch:state.branch, file:state.file, values }) });
+async function lockVariable(key) {
+  const inp = $('#env-body input[data-key="'+key+'"]');
+  const val = inp ? inp.value : '';
   const msg = $('#apply-msg');
+  const d = await api('/api/apply', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ repo:state.repo, branch:state.branch, file:state.file, values:{[key]:val}, write:true }) });
   if (!d.ok) { msg.className='msg err'; msg.textContent=(d.errors||[d.error]).join('; '); return; }
   state.content = d.content; state.vars = d.vars||[];
-  $('#preview').textContent = d.content;
-  $('#raw').value = d.content;
-  renderEnv();
-  msg.className='msg ok'; msg.textContent='✅ 已写入本地文件（未提交）。';
+  renderPreview(d.content, d.modified||[]);
+  msg.className='msg ok'; msg.textContent=`🔒 ${key} 已锁定并写入本地文件 (${val})`;
 }
 
-async function doReset() {
-  if (!confirm('确定丢弃该文件的本地改动，恢复为分支原始内容？')) return;
-  const d = await api('/api/reset', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ repo:state.repo, branch:state.branch, file:state.file }) });
-  if (!d.ok) { $('#apply-msg').className='msg err'; $('#apply-msg').textContent=d.error; return; }
-  state.content = d.content; state.vars = d.vars||[];
-  $('#preview').textContent = d.content; $('#raw').value = d.content;
-  renderEnv();
-  $('#apply-msg').className='msg ok'; $('#apply-msg').textContent='已恢复原始内容。';
+/* 表单事件委托 */
+$('#env-body').addEventListener('click', (e) => {
+  const ref = e.target.closest('.uuid-refresh');
+  if (ref) {
+    const k = ref.dataset.key;
+    state.uuidValue[k] = genUUID();
+    state.dirty[k] = true;
+    const inp = $('#env-body input[data-key="'+k+'"]');
+    if (inp) inp.value = state.uuidValue[k];
+    schedulePreview();
+    return;
+  }
+  const lock = e.target.closest('.lock');
+  if (lock) lockVariable(lock.dataset.key);
+});
+$('#env-body').addEventListener('input', (e) => {
+  const inp = e.target.closest('input[data-key]');
+  if (!inp) return;
+  state.uuidValue[inp.dataset.key] = inp.value;
+  state.dirty[inp.dataset.key] = true;
+  schedulePreview();
+});
+
+/* ---------- JS 混淆 (前端本地执行, javascript-obfuscator 同款) ---------- */
+let obfLibPromise = null;
+function loadObfLib() {
+  if (obfLibPromise) return obfLibPromise;
+  obfLibPromise = new Promise((resolve, reject) => {
+    if (window.JavaScriptObfuscator) return resolve();
+    const s = document.createElement('script');
+    s.src = '/static/index.browser.js';   // 1.4MB, 懒加载 + 浏览器缓存
+    s.onload = () => resolve();
+    s.onerror = () => { obfLibPromise = null; reject(new Error('混淆库加载失败')); };
+    document.head.appendChild(s);
+  });
+  return obfLibPromise;
+}
+async function doObfuscate() {
+  const msg = $('#obf-msg');
+  const code = $('#preview').textContent;   // 混淆对象 = 右侧修改后的完整文件
+  if (!code.trim()) { msg.className='msg err'; msg.textContent='没有可混淆的内容'; return; }
+  const ext = (state.file.split('.').pop() || '').toLowerCase();
+  const btn = $('#btn-obf'); btn.disabled = true; btn.textContent = '⏳ 混淆中...';
+  try {
+    if (ext === 'py') {
+      // Python 代码 -> Python 混淆 (后端本地实现, 与 obf.eooce.com 同款)
+      const d = await api('/api/obfuscate-python', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ code }) });
+      if (!d.ok) { msg.className='msg err'; msg.textContent=d.error||'混淆失败'; return; }
+      $('#obf-output').textContent = d.obfuscated;
+      msg.className='msg ok';
+      msg.textContent = `✅ Python 混淆完成: ${d.original_len} → ${d.obfuscated_len} 字符`;
+    } else if (['js','ts','cjs','mjs'].includes(ext)) {
+      // JS 系 -> javascript-obfuscator (前端本地)
+      await loadObfLib();
+      const preset = $('#obf-preset').value;
+      const result = JavaScriptObfuscator.obfuscate(code, {
+        optionsPreset: preset,
+        compact: true,
+      }).getObfuscatedCode();
+      $('#obf-output').textContent = result;
+      msg.className='msg ok';
+      msg.textContent = `✅ JS 混淆完成: ${code.length} → ${result.length} 字符 (${preset})`;
+    } else {
+      msg.className='msg err';
+      msg.textContent = `暂不支持 .${ext} 文件混淆（支持 .py / .js / .ts 等）`;
+    }
+  } catch (e) {
+    msg.className='msg err'; msg.textContent='混淆失败: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '🧊 混淆当前内容';
+  }
+}
+function copyObfResult() {
+  const txt = $('#obf-output').textContent;
+  if (!txt || txt.startsWith('（点「混淆')) return;
+  const done = () => { $('#obf-msg').className='msg ok'; $('#obf-msg').textContent='✅ 已复制混淆结果'; setTimeout(()=>$('#obf-msg').textContent='', 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(()=>fallbackCopy(txt, done));
+  else fallbackCopy(txt, done);
 }
 
-async function doRawSave() {
-  const d = await api('/api/raw-save', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ repo:state.repo, branch:state.branch, file:state.file, content: $('#raw').value }) });
-  if (!d.ok) { $('#apply-msg').className='msg err'; $('#apply-msg').textContent=d.error; return; }
-  state.content = d.content; state.vars = d.vars||[];
-  $('#preview').textContent = d.content;
-  renderEnv();
-  $('#apply-msg').className='msg ok'; $('#apply-msg').textContent='✅ 原始内容已保存到本地文件。';
+async function downloadObfResult() {
+  const txt = $('#obf-output').textContent;
+  const msg = $('#obf-msg');
+  if (!txt || txt.startsWith('（点「混淆')) { msg.className='msg err'; msg.textContent='请先点「混淆当前内容」再下载'; return; }
+  const r = await fetch('/api/download-obfuscated', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ repo: state.repo, branch: state.branch, file: state.file, code: txt }) });
+  if (!r.ok) { msg.className='msg err'; msg.textContent='下载失败'; return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${state.repo}-${state.branch.replace(/\//g,'_')}-obfuscated.zip`;
+  a.click(); URL.revokeObjectURL(a.href);
+  msg.className='msg ok'; msg.textContent='✅ 压缩包已下载（仅混淆文件 + 依赖文件）';
 }
 
 function copyContent() {
@@ -277,22 +547,83 @@ function downloadContent() {
   a.click(); URL.revokeObjectURL(a.href);
 }
 
-function backToList() { $('#view-config').classList.add('hidden'); $('#view-cards').classList.remove('hidden'); loadStatus(); }
-
 /* ---------- 绑定 ---------- */
 $('#btn-init').onclick = doInit;
 $('#btn-refresh').onclick = loadStatus;
 $('#file-select').onchange = loadFile;
 $('#btn-reload-file').onclick = loadFile;
-$('#btn-apply').onclick = doApply;
-$('#btn-reset').onclick = doReset;
-$('#btn-raw-save').onclick = doRawSave;
-$('#btn-raw-reload').onclick = () => { $('#raw').value = state.content; };
 $('#btn-copy').onclick = copyContent;
 $('#btn-download').onclick = downloadContent;
 $('#btn-back').onclick = backToList;
+$('#btn-obf').onclick = doObfuscate;
+$('#btn-obf-copy').onclick = copyObfResult;
+$('#btn-obf-download').onclick = downloadObfResult;
 
-loadStatus();
+/* 修改密码弹窗 */
+$('#btn-pw').onclick = () => {
+  $('#pw-modal').classList.remove('hidden');
+  $('#pw-msg').textContent = '';
+};
+$('#btn-pw-cancel').onclick = () => $('#pw-modal').classList.add('hidden');
+$('#btn-pw-save').onclick = async () => {
+  const old = $('#pw-old').value, n1 = $('#pw-new').value, n2 = $('#pw-new2').value;
+  const msg = $('#pw-msg');
+  if (!old || !n1) { msg.className='msg err'; msg.textContent='请填写原密码和新密码'; return; }
+  if (n1 !== n2) { msg.className='msg err'; msg.textContent='两次新密码不一致'; return; }
+  const d = await api('/api/change-password', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ old_password: old, new_password: n1 }) });
+  if (!d.ok) { msg.className='msg err'; msg.textContent=d.error||'修改失败'; return; }
+  msg.className='msg ok'; msg.textContent='✅ 密码已修改';
+  $('#pw-old').value=''; $('#pw-new').value=''; $('#pw-new2').value='';
+};
+
+/* 仓库管理 */
+let repoData = [];
+async function openRepoManager() {
+  const d = await api('/api/repos-config');
+  repoData = (d.repos || []).map(r => ({ name:r.name, url:r.url, files:(r.files||[]).join(', ') }));
+  renderRepoRows();
+  $('#repo-msg').textContent = '';
+  $('#repo-modal').classList.remove('hidden');
+}
+function renderRepoRows() {
+  const box = $('#repo-rows'); box.innerHTML = '';
+  repoData.forEach((r, i) => {
+    const row = document.createElement('div');
+    row.className = 'repo-row';
+    row.innerHTML = `
+      <input data-f="name" value="${esc(r.name)}" placeholder="仓库名">
+      <input data-f="url" value="${esc(r.url)}" placeholder="https://github.com/xxx/yyy.git">
+      <input data-f="files" value="${esc(r.files)}" placeholder="优先解析文件, 逗号分隔 (可空)">
+      <button class="rm" data-i="${i}" title="删除">✕</button>`;
+    row.querySelectorAll('input').forEach(inp => {
+      inp.oninput = () => { repoData[i][inp.dataset.f] = inp.value; };
+    });
+    row.querySelector('.rm').onclick = () => { repoData.splice(i, 1); renderRepoRows(); };
+    box.appendChild(row);
+  });
+}
+async function saveRepoManager() {
+  const repos = repoData.filter(r => (r.name||'').trim() && (r.url||'').trim())
+    .map(r => ({ name:r.name.trim(), url:r.url.trim(),
+                 files:(r.files||'').split(',').map(s=>s.trim()).filter(Boolean) }));
+  const d = await api('/api/repos-config', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ repos }) });
+  const msg = $('#repo-msg');
+  if (!d.ok) { msg.className='msg err'; msg.textContent=d.error||'保存失败'; return; }
+  msg.className='msg ok';
+  msg.textContent = `✅ 已保存 ${d.repos.length} 个仓库（新增的需点「⚡ 初始化 / 更新仓库」克隆）`;
+  loadStatus();
+}
+$('#btn-repos').onclick = openRepoManager;
+$('#btn-repo-add').onclick = () => { repoData.push({name:'', url:'', files:''}); renderRepoRows(); };
+$('#btn-repo-cancel').onclick = () => $('#repo-modal').classList.add('hidden');
+$('#btn-repo-save').onclick = saveRepoManager;
+
+/* 初始路由 */
+const initRoute = parseRoute();
+if (initRoute) { showConfig(initRoute.repo, initRoute.branch); }
+else { loadStatus(); }
 </script>
 </body>
 </html>
