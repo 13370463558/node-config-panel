@@ -34,7 +34,7 @@ DOM Cloud 免费版**文件系统持久**（1.5GB），克隆一次重启不丢�
 5. 配置 NGINX (面板里 Website → Settings → Nginx 或自定义 recipe):
    ```yaml
    nginx:
-     root: public_html/public
+     root: public_html/public    # 空目录, 仅作静态根, 防止 app.py 等源码被直接下载
      passenger:
        enabled: on
        app_start_command: gunicorn app:app --bind 127.0.0.1:$PORT --workers 1 --timeout 120
