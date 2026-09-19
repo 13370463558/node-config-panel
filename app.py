@@ -312,6 +312,54 @@ def _line_comment(line, quote_chars=("'", '"'), comment_start="//"):
     return ""
 
 
+_JS_NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?")
+_JS_BOOL_RE = re.compile(r"^true$|^false$", re.IGNORECASE)
+# 字面量之后允许保留的结构后缀: 空白/闭括号/分号/逗号 + 方法调用链(如 .toLowerCase())
+_JS_SUFFIX_OK_RE = re.compile(r"""^[\s\);,}\]]*
+    (?:\.[A-Za-z_$][A-Za-z0-9_$]*\([^()]*\)[\s\);,}\]]*)*$
+    """, re.VERBOSE)
+
+
+def _js_default_parts(seg):
+    """从 JS '||' 之后的片段识别默认值, 返回 (token, editable)。
+
+    像 `'true').toLowerCase());` 这种"字面量+方法调用/闭括号"后缀,
+    只把 `'true'` 当作可编辑 token, 后缀结构留在原行——否则整体重写会把
+    `).toLowerCase())` 也替换掉, 生成语法损坏的行 (SHOW_LOG 曾踩过:
+    `(process.env.SHOW_LOG || 'true';` 由此而来)。
+    后缀带运算 (如 `+ 'b'`) 时按表达式只读处理, 不开放编辑。
+    """
+    seg = seg.strip()
+    if not seg:
+        return seg, True
+    literal = ""
+    if seg[0] in ("'", '"'):
+        q = seg[0]
+        i = 1
+        while i < len(seg):
+            ch = seg[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == q:
+                literal = seg[:i + 1]
+                break
+            i += 1
+    else:
+        m = _JS_NUM_RE.match(seg)
+        if m:
+            literal = m.group(0)
+        else:
+            m = _JS_BOOL_RE.match(seg)
+            if m:
+                literal = m.group(0)
+    if not literal:
+        return seg, False
+    if _JS_SUFFIX_OK_RE.match(seg[len(literal):]):
+        return literal, True
+    return seg, False
+
+
 def _dedupe_vars(found):
     """同名变量去重: 保留第一个可编辑项 (回退链里的只读副本丢弃)"""
     seen = {}
@@ -371,13 +419,15 @@ def parse_file(path):
                         seg = seg[:ci]
                     # 去掉行尾语句分号/逗号 (字符串内部的不会被 rstrip 误删)
                     token = seg.strip().rstrip(";, ").strip()
+                    # 字面量+方法调用后缀只保留字面量, 后缀留在原行, 重写不破坏语法
+                    token, editable = _js_default_parts(token)
                     kind, value, quote = _classify_token(token)
                     # 默认值 token 在整行中的绝对位置
                     seg_start = pipe + 2
                     token_start = line_no + m.end() + seg_start + seg.find(token)
                     token_end = token_start + len(token)
                     fallback = True  # 后面的都在回退链里, 只读
-                readonly = (kind == "expr") or (not token and pipe == -1)
+                readonly = (kind == "expr") or (not token and pipe == -1) or not editable
                 found.append({
                     "key": key, "kind": kind, "value": value, "quote": quote,
                     "comment": comment, "readonly": readonly,
@@ -490,9 +540,10 @@ def parse_content_string(content, ext):
                     if ci != -1:
                         seg = seg[:ci]
                     token = seg.strip().rstrip(";, ").strip()
+                    token, editable = _js_default_parts(token)
                     kind, value, quote = _classify_token(token)
                     fallback = True
-                readonly = (kind == "expr") or (not token and pipe == -1)
+                readonly = (kind == "expr") or (not token and pipe == -1) or not editable
                 found.append({
                     "key": key, "kind": kind, "value": value, "quote": quote,
                     "comment": comment, "readonly": readonly, "span": None,
@@ -572,6 +623,15 @@ def write_file_text(name, rel, content):
     with open(full, "w", encoding="utf-8") as f:
         f.write(content)
     return content
+
+
+def git_show_file(name, branch, rel):
+    """返回 origin/<branch> 里 rel 文件的原始内容 (解锁还原用)"""
+    rdir = repo_dir(name)
+    rc, out, err = run_git(rdir, "show", f"origin/{branch}:{rel}")
+    if rc != 0:
+        raise RuntimeError(err.strip() or "git show 失败")
+    return out
 
 
 # ==================== API ====================
@@ -743,6 +803,73 @@ def api_reset():
         return jsonify({"ok": True, "content": content, "vars": items})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/locks")
+def api_locks():
+    """查看当前 仓库|分支 的锁定变量 (用于「🔓 查看/取消锁定」弹窗)"""
+    name = request.args.get("repo", "")
+    branch = request.args.get("branch", "")
+    locks = load_locks()
+    rec = locks.get(f"{name}|{branch}") or {}
+    items = []
+    for rel, kv in rec.items():
+        for k, v in (kv or {}).items():
+            items.append({"file": rel, "key": k, "value": v})
+    items.sort(key=lambda x: (x["file"], x["key"]))
+    return jsonify({"ok": True, "locks": items})
+
+
+@app.route("/api/unlock", methods=["POST"])
+def api_unlock():
+    """取消锁定: 移除 locks.json 里该变量的记录, 并把文件里该变量还原为上游原始值"""
+    data = request.get_json(force=True) or {}
+    name = data.get("repo", "")
+    branch = data.get("branch", "")
+    rel = data.get("file", "")
+    key = data.get("key", "")
+    locks = load_locks()
+    rec = locks.get(f"{name}|{branch}") or {}
+    kv = rec.get(rel) or {}
+    if not key or key not in kv:
+        return jsonify({"ok": False, "error": "没有该变量的锁定记录"})
+    old_val = kv.pop(key)
+    if not kv:
+        rec.pop(rel, None)
+    if not rec:
+        locks.pop(f"{name}|{branch}", None)
+    save_locks(locks)
+    # 还原文件里该变量为上游原始值 (尽力而为, 失败只提示不中断)
+    restored = False
+    try:
+        full = os.path.join(repo_dir(name), rel)
+        content = read_file_text(name, rel)
+        orig = git_show_file(name, branch, rel)
+        ext = os.path.splitext(rel)[1]
+        tmp = os.path.join(repo_dir(name), ".panel_tmp_orig" + ext)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(orig)
+        try:
+            items_orig, _ = parse_file(tmp)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        item_orig = next((it for it in items_orig if it["key"] == key), None)
+        items_cur, _ = parse_file(full)
+        item_cur = next((it for it in items_cur if it["key"] == key), None)
+        if (item_orig is not None and not item_orig["readonly"]
+                and item_orig["span"] is not None
+                and item_cur is not None and item_cur["span"] is not None):
+            token_orig = orig[item_orig["span"][0]:item_orig["span"][1]]
+            s, e = item_cur["span"]
+            content = content[:s] + token_orig + content[e:]
+            if content != read_file_text(name, rel):
+                write_file_text(name, rel, content)
+                restored = True
+    except Exception:
+        restored = False
+    return jsonify({"ok": True, "key": key, "removed": old_val, "restored": restored,
+                    "msg": "已取消锁定" + ("，变量已还原为上游原始值" if restored else "（文件值未变动）")})
 
 
 @app.route("/api/obfuscate-python", methods=["POST"])

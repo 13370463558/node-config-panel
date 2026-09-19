@@ -54,6 +54,7 @@
   .valcell input { flex:1; min-width:150px; }
   .valcell .lock, .valcell .uuid-refresh { flex:0 0 auto; padding:7px 10px; font-size:13px; }
   .valcell .lock:hover { border-color:var(--warn); }
+  .valcell .lock.locked { border-color:var(--warn); background:rgba(210,153,34,.15); color:var(--warn); }
   .valcell .uuid-refresh:hover { border-color:var(--accent); }
   .valcell input::placeholder { color:#5c6678; font-size:12px; }
   .toolbar { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
@@ -138,6 +139,20 @@
     </div>
   </div>
 
+  <!-- 锁定管理弹窗 -->
+  <div id="lock-modal" class="modal-bg hidden">
+    <div class="modal" style="width:680px;max-width:94vw">
+      <h3>🔓 锁定变量管理（当前仓库/分支）</h3>
+      <div class="repo-hint">已锁定的变量值写入了本地文件；取消锁定会移除记录，并把文件里该变量还原为上游原始值。</div>
+      <div id="lock-list" style="max-height:50vh;overflow:auto;"></div>
+      <div class="toolbar" style="margin-top:10px">
+        <div style="flex:1"></div>
+        <button id="btn-lock-close">关闭</button>
+      </div>
+      <div id="lock-msg" class="msg"></div>
+    </div>
+  </div>
+
   <!-- 卡片列表视图 -->
   <div id="view-cards">
     <div class="statusline" id="status-line">加载中...</div>
@@ -146,7 +161,11 @@
 
   <!-- 配置编辑视图 -->
   <div id="view-config" class="hidden">
-    <div class="breadcrumb" id="breadcrumb"></div>
+    <div class="breadcrumb" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span id="bc-text"></span>
+      <div style="flex:1"></div>
+      <button id="btn-lock-manage">🔓 查看/取消锁定</button>
+    </div>
     <div class="config-layout">
       <div class="panel">
         <h3>环境变量</h3>
@@ -284,7 +303,9 @@ async function showConfig(repo, branch) {
   state.repo = repo; state.branch = branch;
   $('#view-cards').classList.add('hidden');
   $('#view-config').classList.remove('hidden');
-  $('#breadcrumb').innerHTML = `${esc(repo)} <b>/ ${esc(branch)}</b>`;
+  $('#view-cards').classList.add('hidden');
+  $('#view-config').classList.remove('hidden');
+  $('#bc-text').innerHTML = `${esc(repo)} <b>/ ${esc(branch)}</b>`;
   await reloadBranch();
 }
 function enterRepo(repo, branch) {
@@ -336,6 +357,7 @@ async function loadFile() {
   state.vars = d.vars || [];
   state.content = d.content;
   renderEnv();
+  markLocked();
   renderPreview(d.content, []);
   const ext = (state.file.split('.').pop() || '').toLowerCase();
   const isPy = ext === 'py';
@@ -428,7 +450,57 @@ async function lockVariable(key) {
   if (!d.ok) { msg.className='msg err'; msg.textContent=(d.errors||[d.error]).join('; '); return; }
   state.content = d.content; state.vars = d.vars||[];
   renderPreview(d.content, d.modified||[]);
+  markLocked();
   msg.className='msg ok'; msg.textContent=`🔒 ${key} 已锁定并写入本地文件 (${val})`;
+}
+
+/* 在表单里标识已锁定的变量 */
+async function markLocked() {
+  try {
+    const d = await api(`/api/locks?repo=${encodeURIComponent(state.repo)}&branch=${encodeURIComponent(state.branch)}`);
+    const locked = new Set((d.locks||[]).filter(l=>l.file===state.file).map(l=>l.key));
+    $$('#env-body .lock').forEach(b => {
+      const on = locked.has(b.dataset.key);
+      b.classList.toggle('locked', on);
+      b.title = on ? '已锁定此值 (点击重新锁定为当前输入值)' : '锁定此分支下该变量的值为当前输入值 (写入本地文件)';
+    });
+  } catch(e){}
+}
+
+/* ---- 锁定管理弹窗 ---- */
+let lockList = [];
+async function openLocks() {
+  $('#lock-msg').textContent = '';
+  lockList = [];
+  const d = await api(`/api/locks?repo=${encodeURIComponent(state.repo)}&branch=${encodeURIComponent(state.branch)}`);
+  lockList = d.locks || [];
+  renderLocks();
+  $('#lock-modal').classList.remove('hidden');
+}
+function renderLocks() {
+  const box = $('#lock-list'); box.innerHTML = '';
+  if (!lockList.length) {
+    box.innerHTML = '<div class="ro">该仓库/分支暂无锁定变量</div>';
+    return;
+  }
+  for (const it of lockList) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #232a38;';
+    row.innerHTML = `<span style="font-family:ui-monospace,Menlo,monospace;flex:1;word-break:break-all">${esc(it.file)} <b>${esc(it.key)}</b> = <span style="color:var(--warn)">${esc(it.value)}</span></span>
+      <button class="unlock" style="flex:0 0 auto" data-file="${esc(it.file)}" data-key="${esc(it.key)}">取消锁定</button>`;
+    row.querySelector('.unlock').onclick = () => unlockVar(it.file, it.key);
+    box.appendChild(row);
+  }
+}
+async function unlockVar(file, key) {
+  const msg = $('#lock-msg');
+  msg.className='msg'; msg.textContent='处理中...';
+  const d = await api('/api/unlock', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ repo:state.repo, branch:state.branch, file, key }) });
+  if (!d.ok) { msg.className='msg err'; msg.textContent=d.error||'取消失败'; return; }
+  msg.className='msg ok'; msg.textContent=`🔓 ${key}：${d.msg||'已取消锁定'}`;
+  openLocks();          // 刷新列表
+  loadFile();           // 刷新表单/预览 (变量值可能已还原)
 }
 
 /* 表单事件委托 */
@@ -619,6 +691,10 @@ $('#btn-repos').onclick = openRepoManager;
 $('#btn-repo-add').onclick = () => { repoData.push({name:'', url:'', files:''}); renderRepoRows(); };
 $('#btn-repo-cancel').onclick = () => $('#repo-modal').classList.add('hidden');
 $('#btn-repo-save').onclick = saveRepoManager;
+
+/* 锁定管理 */
+$('#btn-lock-manage').onclick = openLocks;
+$('#btn-lock-close').onclick = () => $('#lock-modal').classList.add('hidden');
 
 /* 初始路由 */
 const initRoute = parseRoute();
