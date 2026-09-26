@@ -684,6 +684,195 @@ def api_repos_config_save():
     return jsonify({"ok": True, "repos": clean})
 
 
+def _branch_ref_exists(name, ref):
+    rc, _, _ = run_git(repo_dir(name), "show-ref", "--verify", "--quiet", ref)
+    return rc == 0
+
+
+def _branch_needs_update(name, branch):
+    """判断 origin/<branch> 是否领先面板当前保存的对应分支。"""
+    rdir = repo_dir(name)
+    panel_ref = f"refs/heads/panel-{branch}"
+    local_ref = f"refs/heads/{branch}"
+    if _branch_ref_exists(name, panel_ref):
+        base_ref = panel_ref
+    elif _branch_ref_exists(name, local_ref):
+        base_ref = local_ref
+    else:
+        return False, ""
+    rc, out, err = run_git(
+        rdir, "rev-list", "--count", f"{base_ref}..origin/{branch}"
+    )
+    if rc != 0:
+        return False, err.strip() or "无法比较分支"
+    try:
+        return int(out.strip() or "0") > 0, ""
+    except ValueError:
+        return False, "无法解析提交差异"
+
+
+def _restore_branch_locks(name, branch, locks):
+    """重置指定 panel 分支到 origin 最新提交并重新应用锁定值。"""
+    rdir = repo_dir(name)
+    result = {
+        "repo": name, "branch": branch, "ok": False,
+        "status": "failed", "locks": [], "commit": "",
+    }
+    rc, _, err = run_git(
+        rdir, "checkout", "-f", "-B", f"panel-{branch}",
+        f"origin/{branch}", timeout=180,
+    )
+    if rc != 0:
+        result["error"] = f"切换分支失败: {(err or '').strip()[:200]}"
+        return result
+
+    for rel, values in (locks.get(f"{name}|{branch}") or {}).items():
+        lock_result = {"file": rel, "ok": False, "values": values}
+        try:
+            full = os.path.join(rdir, rel)
+            content = read_file_text(name, rel)
+            items, _ = parse_file(full)
+            new_content, errors, _, _ = apply_values(
+                content, items, values, os.path.splitext(rel)[1].lower()
+            )
+            if errors:
+                lock_result["error"] = "; ".join(errors)
+            else:
+                write_file_text(name, rel, new_content)
+                lock_result["ok"] = True
+                lock_result["changed"] = new_content != content
+        except Exception as exc:
+            lock_result["error"] = str(exc)
+        result["locks"].append(lock_result)
+
+    failed_locks = [item for item in result["locks"] if not item["ok"]]
+    if failed_locks:
+        result["error"] = "部分锁定值恢复失败"
+        return result
+
+    rc, changed, err = run_git(rdir, "status", "--porcelain")
+    if rc != 0:
+        result["error"] = f"检查工作区失败: {(err or '').strip()[:200]}"
+        return result
+    if changed.strip():
+        rc, _, err = run_git(rdir, "add", "-A")
+        if rc == 0:
+            rc, _, err = run_git(
+                rdir, "-c", "user.name=panel",
+                "-c", "user.email=panel@local", "commit", "-m",
+                "panel: apply locked values",
+            )
+        if rc != 0:
+            result["error"] = f"本地 commit 失败: {(err or '').strip()[:200]}"
+            return result
+
+    rc, out, err = run_git(rdir, "rev-parse", "--short", "HEAD")
+    if rc != 0:
+        result["error"] = f"读取更新后提交失败: {(err or '').strip()[:200]}"
+        return result
+    result.update({"ok": True, "status": "updated", "commit": out.strip()})
+    return result
+
+
+@app.route("/api/check-updates", methods=["POST"])
+def api_check_updates():
+    """Fetch 全部已克隆仓库并检查所有 origin 远端分支。"""
+    updates = []
+    repos = []
+    failures = []
+    for repo in load_repos():
+        name = repo.get("name", "")
+        if not is_cloned(name):
+            continue
+        rc, _, err = run_git(repo_dir(name), "fetch", "origin", "--prune", timeout=300)
+        if rc != 0:
+            failure = {"repo": name, "error": (err or "fetch 失败").strip()[:200]}
+            failures.append(failure)
+            repos.append({"repo": name, "ok": False, "error": failure["error"]})
+            continue
+        repo_updates = []
+        compare_errors = []
+        for branch in list_branches(name):
+            needs_update, compare_error = _branch_needs_update(name, branch)
+            if compare_error:
+                compare_errors.append({"branch": branch, "error": compare_error})
+            elif needs_update:
+                item = {"repo": name, "branch": branch}
+                repo_updates.append(item)
+                updates.append(item)
+        repos.append({
+            "repo": name, "ok": not compare_errors,
+            "updates": repo_updates, "errors": compare_errors,
+        })
+        failures.extend(
+            {"repo": name, "branch": item["branch"], "error": item["error"]}
+            for item in compare_errors
+        )
+    return jsonify({
+        "ok": not failures, "updates": updates, "repos": repos,
+        "failures": failures, "up_to_date": not updates and not failures,
+    })
+
+
+@app.route("/api/update-selected", methods=["POST"])
+def api_update_selected():
+    """仅更新用户选择的仓库/分支，并恢复对应锁定值。"""
+    data = request.get_json(force=True) or {}
+    selected = data.get("branches") or []
+    if not isinstance(selected, list) or not selected:
+        return jsonify({"ok": False, "error": "未选择要更新的分支"}), 400
+
+    configured = {repo.get("name") for repo in load_repos()}
+    seen = set()
+    clean = []
+    for item in selected:
+        if not isinstance(item, dict):
+            return jsonify({"ok": False, "error": "分支选择格式错误"}), 400
+        name = str(item.get("repo", "")).strip()
+        branch = str(item.get("branch", "")).strip()
+        key = (name, branch)
+        if not name or not branch or name not in configured or key in seen:
+            continue
+        seen.add(key)
+        clean.append(key)
+    if not clean:
+        return jsonify({"ok": False, "error": "没有有效的仓库/分支选择"}), 400
+
+    locks = load_locks()
+    fetched = {}
+    results = []
+    for name, branch in clean:
+        if not is_cloned(name):
+            results.append({
+                "repo": name, "branch": branch, "ok": False,
+                "status": "failed", "error": "仓库未克隆",
+            })
+            continue
+        if name not in fetched:
+            rc, _, err = run_git(repo_dir(name), "fetch", "origin", "--prune", timeout=300)
+            fetched[name] = None if rc == 0 else (err or "fetch 失败").strip()[:200]
+        if fetched[name]:
+            results.append({
+                "repo": name, "branch": branch, "ok": False,
+                "status": "failed", "error": f"fetch 失败: {fetched[name]}",
+            })
+            continue
+        if branch not in list_branches(name):
+            results.append({
+                "repo": name, "branch": branch, "ok": False,
+                "status": "failed", "error": "origin 远端分支不存在",
+            })
+            continue
+        results.append(_restore_branch_locks(name, branch, locks))
+
+    return jsonify({
+        "ok": all(item["ok"] for item in results),
+        "results": results,
+        "updated": [item for item in results if item["ok"]],
+        "failed": [item for item in results if not item["ok"]],
+    })
+
+
 @app.route("/api/update", methods=["POST"])
 def api_update():
     """更新单个仓库到最新, 并把锁定过的变量值重新写回文件。

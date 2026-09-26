@@ -87,8 +87,15 @@
 
   /* 编辑界面隐藏主页操作按钮 */
   body.in-config #btn-pw, body.in-config a[href="/logout"],
-  body.in-config #btn-init, body.in-config #btn-refresh,
+  body.in-config #btn-init, body.in-config #btn-check-updates, body.in-config #btn-refresh,
   body.in-config #btn-repos { display:none; }
+
+  /* 主动检测更新 */
+  .update-list { max-height:50vh; overflow:auto; margin:10px 0; }
+  .update-row { display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid #232a38; }
+  .update-row label { flex:1; font-family:ui-monospace,Menlo,monospace; word-break:break-all; }
+  .update-summary { color:var(--muted); font-size:13px; line-height:1.6; }
+  .update-results { margin-top:10px; white-space:pre-wrap; font-size:13px; line-height:1.6; }
 </style>
 </head>
 <body>
@@ -100,6 +107,7 @@
   <a href="/logout" style="text-decoration:none"><button>退出</button></a>
   <button id="btn-repos">📚 仓库管理</button>
   <button id="btn-init">⚡ 初始化 / 更新仓库</button>
+  <button id="btn-check-updates" class="primary">🔎 主动检测更新</button>
   <button id="btn-refresh">刷新列表</button>
 </header>
 
@@ -150,6 +158,22 @@
         <button id="btn-lock-close">关闭</button>
       </div>
       <div id="lock-msg" class="msg"></div>
+    </div>
+  </div>
+
+  <!-- 主动检测更新弹窗 -->
+  <div id="update-modal" class="modal-bg hidden">
+    <div class="modal" style="width:680px;max-width:94vw">
+      <h3>🔎 可用更新</h3>
+      <div id="update-summary" class="update-summary">正在检测全部已克隆仓库及 origin 远端分支...</div>
+      <div id="update-list" class="update-list"></div>
+      <div class="toolbar">
+        <label><input type="checkbox" id="update-select-all"> 全选</label>
+        <div style="flex:1"></div>
+        <button id="btn-update-close">关闭</button>
+        <button id="btn-update-selected" class="primary" disabled>更新所选分支</button>
+      </div>
+      <div id="update-results" class="update-results"></div>
     </div>
   </div>
 
@@ -618,6 +642,127 @@ function downloadContent() {
   a.download = state.file.split('/').pop();
   a.click(); URL.revokeObjectURL(a.href);
 }
+
+/* ---------- 主动检测与选择更新 ---------- */
+let availableUpdates = [];
+
+function refreshUpdateSelection() {
+  const boxes = Array.from($$('#update-list input[type=checkbox][data-repo]'));
+  const selected = boxes.filter(box => box.checked);
+  $('#btn-update-selected').disabled = selected.length === 0;
+  $('#update-select-all').checked = boxes.length > 0 && selected.length === boxes.length;
+  $('#update-select-all').indeterminate = selected.length > 0 && selected.length < boxes.length;
+}
+
+function renderAvailableUpdates(data) {
+  availableUpdates = data.updates || [];
+  const list = $('#update-list');
+  const failures = data.failures || [];
+  list.innerHTML = '';
+  $('#update-results').textContent = '';
+
+  if (availableUpdates.length) {
+    $('#update-summary').textContent = `检测到 ${availableUpdates.length} 个可更新的仓库 / 分支。请选择后更新。`;
+    availableUpdates.forEach((item, index) => {
+      const row = document.createElement('div');
+      row.className = 'update-row';
+      row.innerHTML = `<input type="checkbox" id="update-${index}" data-repo="${esc(item.repo)}" data-branch="${esc(item.branch)}">
+        <label for="update-${index}">${esc(item.repo)} / ${esc(item.branch)}</label>`;
+      row.querySelector('input').onchange = refreshUpdateSelection;
+      list.appendChild(row);
+    });
+  } else if (!failures.length) {
+    $('#update-summary').textContent = '✅ 无需更新，全部已克隆仓库的 origin 远端分支均为最新。';
+  } else {
+    $('#update-summary').textContent = '❌ 检测未完成，没有取得可更新分支列表。';
+  }
+
+  if (failures.length) {
+    $('#update-results').className = 'update-results msg err';
+    $('#update-results').textContent = '检测失败：\n' + failures.map(item =>
+      `❌ ${item.repo}${item.branch ? ' / ' + item.branch : ''}: ${item.error}`
+    ).join('\n');
+  }
+  refreshUpdateSelection();
+}
+
+async function checkUpdates() {
+  const btn = $('#btn-check-updates');
+  btn.disabled = true;
+  btn.textContent = '检测中...';
+  $('#update-modal').classList.remove('hidden');
+  $('#update-summary').textContent = '正在 fetch 全部已克隆仓库，并检查所有 origin 远端分支...';
+  $('#update-list').innerHTML = '';
+  $('#update-results').textContent = '';
+  $('#update-select-all').checked = false;
+  $('#btn-update-selected').disabled = true;
+  try {
+    const data = await api('/api/check-updates', { method:'POST' });
+    renderAvailableUpdates(data);
+  } catch (error) {
+    $('#update-summary').textContent = '❌ 检测失败';
+    $('#update-results').className = 'update-results msg err';
+    $('#update-results').textContent = error.message || '请求失败';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔎 主动检测更新';
+  }
+}
+
+async function updateSelectedBranches() {
+  const selected = Array.from($$('#update-list input[type=checkbox][data-repo]:checked')).map(box => ({
+    repo: box.dataset.repo,
+    branch: box.dataset.branch,
+  }));
+  if (!selected.length) return;
+
+  const btn = $('#btn-update-selected');
+  btn.disabled = true;
+  btn.textContent = '更新中...';
+  $('#update-results').className = 'update-results';
+  $('#update-results').textContent = '正在更新所选分支并恢复锁定值...';
+  try {
+    const data = await api('/api/update-selected', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ branches:selected }),
+    });
+    const lines = (data.results || []).map(item => {
+      if (!item.ok) return `❌ ${item.repo} / ${item.branch}: ${item.error || '更新失败'}`;
+      const locks = item.locks || [];
+      if (!locks.length) return `✅ ${item.repo} / ${item.branch}: 更新成功 (${item.commit})，无锁定值`;
+      const restored = locks.filter(lock => lock.ok).length;
+      return `✅ ${item.repo} / ${item.branch}: 更新成功 (${item.commit})，锁定值恢复 ${restored}/${locks.length} 个文件`;
+    });
+    $('#update-results').className = `update-results msg ${data.ok ? 'ok' : 'err'}`;
+    $('#update-results').textContent = lines.join('\n') || (data.error || '没有更新结果');
+    await loadStatus();
+    if (data.ok) {
+      availableUpdates = availableUpdates.filter(item =>
+        !selected.some(chosen => chosen.repo === item.repo && chosen.branch === item.branch));
+      renderAvailableUpdates({ updates:availableUpdates, failures:[] });
+      $('#update-results').className = 'update-results msg ok';
+      $('#update-results').textContent = lines.join('\n');
+    }
+  } catch (error) {
+    $('#update-results').className = 'update-results msg err';
+    $('#update-results').textContent = `❌ 更新失败: ${error.message || '请求失败'}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '更新所选分支';
+    refreshUpdateSelection();
+  }
+}
+
+$('#btn-check-updates').onclick = checkUpdates;
+$('#btn-update-close').onclick = () => $('#update-modal').classList.add('hidden');
+$('#btn-update-selected').onclick = updateSelectedBranches;
+$('#update-select-all').onchange = event => {
+  $$('#update-list input[type=checkbox][data-repo]').forEach(box => {
+    box.checked = event.target.checked;
+  });
+  refreshUpdateSelection();
+};
 
 /* ---------- 绑定 ---------- */
 $('#btn-init').onclick = doInit;
