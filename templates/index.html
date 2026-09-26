@@ -161,6 +161,21 @@
     </div>
   </div>
 
+  <!-- 未混淆备份弹窗 -->
+  <div id="backup-modal" class="modal-bg hidden">
+    <div class="modal" style="width:900px;max-width:96vw">
+      <h3>🗂️ 未混淆备份（当前仓库 / 分支）</h3>
+      <div class="repo-hint">每个仓库与分支最多保留最新 10 份。恢复只会把内容放回右侧预览框，不会覆盖仓库文件。</div>
+      <div id="backup-list" style="max-height:45vh;overflow:auto;"></div>
+      <pre class="pre hidden" id="backup-preview" style="margin-top:12px;max-height:35vh"></pre>
+      <div class="toolbar" style="margin-top:10px">
+        <div style="flex:1"></div>
+        <button id="btn-backup-close">关闭</button>
+      </div>
+      <div id="backup-msg" class="msg"></div>
+    </div>
+  </div>
+
   <!-- 主动检测更新弹窗 -->
   <div id="update-modal" class="modal-bg hidden">
     <div class="modal" style="width:680px;max-width:94vw">
@@ -188,6 +203,7 @@
     <div class="breadcrumb" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <span id="bc-text"></span>
       <div style="flex:1"></div>
+      <button id="btn-backups">🗂️ 未混淆备份</button>
       <button id="btn-lock-manage">🔓 查看/取消锁定</button>
     </div>
     <div class="config-layout">
@@ -527,7 +543,150 @@ async function unlockVar(file, key) {
   loadFile();           // 刷新表单/预览 (变量值可能已还原)
 }
 
-/* 表单事件委托 */
+/* ---- 未混淆备份管理 ---- */
+let backupList = [];
+
+function backupRequest(action, extra={}) {
+  return api('/api/obfuscation-backups', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      action,
+      repo:state.repo,
+      branch:state.branch,
+      file:state.file,
+      ...extra,
+    }),
+  });
+}
+
+async function openBackups() {
+  const msg = $('#backup-msg');
+  msg.className = 'msg';
+  msg.textContent = '加载中...';
+  $('#backup-preview').classList.add('hidden');
+  $('#backup-preview').textContent = '';
+  $('#backup-modal').classList.remove('hidden');
+  try {
+    const d = await api(`/api/obfuscation-backups?action=list&repo=${encodeURIComponent(state.repo)}&branch=${encodeURIComponent(state.branch)}&file=${encodeURIComponent(state.file)}`);
+    if (!d.ok) throw new Error(d.error || '备份列表加载失败');
+    backupList = d.backups || [];
+    renderBackups();
+    msg.textContent = '';
+  } catch (error) {
+    msg.className = 'msg err';
+    msg.textContent = error.message || '备份列表加载失败';
+  }
+}
+
+function renderBackups() {
+  const box = $('#backup-list');
+  box.innerHTML = '';
+  if (!backupList.length) {
+    box.innerHTML = '<div class="ro">当前仓库 / 分支暂无未混淆备份</div>';
+    return;
+  }
+  for (const item of backupList) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid #232a38;flex-wrap:wrap;';
+    const same = item.same_as_previous ? ' <span style="color:var(--warn)">（与上一份相同）</span>' : '';
+    row.innerHTML = `<div style="flex:1;min-width:260px;word-break:break-all">
+        <div style="font-family:ui-monospace,Menlo,monospace">${esc(item.filename)}${same}</div>
+        <div class="ro">${esc(item.file)} · ${Number(item.size || 0).toLocaleString()} 字节 · SHA-256 ${esc((item.sha256 || '').slice(0, 16))}…</div>
+      </div>
+      <button class="backup-view">查看</button>
+      <button class="backup-download">下载</button>
+      <button class="backup-restore">恢复到预览</button>
+      <button class="backup-delete danger">删除</button>`;
+    row.querySelector('.backup-view').onclick = () => viewBackup(item.id);
+    row.querySelector('.backup-download').onclick = () => downloadBackup(item);
+    row.querySelector('.backup-restore').onclick = () => restoreBackup(item.id);
+    row.querySelector('.backup-delete').onclick = () => deleteBackup(item);
+    box.appendChild(row);
+  }
+}
+
+async function viewBackup(id) {
+  const msg = $('#backup-msg');
+  try {
+    const d = await backupRequest('view', {id});
+    if (!d.ok) throw new Error(d.error || '查看失败');
+    $('#backup-preview').textContent = d.content;
+    $('#backup-preview').classList.remove('hidden');
+    msg.className = 'msg ok';
+    msg.textContent = `正在查看 ${d.backup.filename}`;
+  } catch (error) {
+    msg.className = 'msg err';
+    msg.textContent = error.message || '查看失败';
+  }
+}
+
+async function downloadBackup(item) {
+  const msg = $('#backup-msg');
+  try {
+    const params = new URLSearchParams({
+      action:'download', repo:state.repo, branch:state.branch,
+      file:state.file, id:item.id,
+    });
+    const response = await fetch(`/api/obfuscation-backups?${params}`);
+    if (response.status === 401) {
+      location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      let error = '下载失败';
+      try { error = (await response.json()).error || error; } catch (e) {}
+      throw new Error(error);
+    }
+    const blob = await response.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = item.filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    msg.className = 'msg ok';
+    msg.textContent = `✅ 已下载 ${item.filename}`;
+  } catch (error) {
+    msg.className = 'msg err';
+    msg.textContent = error.message || '下载失败';
+  }
+}
+
+async function restoreBackup(id) {
+  const msg = $('#backup-msg');
+  try {
+    const d = await backupRequest('restore', {id});
+    if (!d.ok) throw new Error(d.error || '恢复失败');
+    state.content = d.content;
+    state.dirty = {};
+    renderPreview(d.content, []);
+    $('#backup-modal').classList.add('hidden');
+    $('#obf-msg').className = 'msg ok';
+    $('#obf-msg').textContent = `✅ 已将 ${d.backup.filename} 恢复到右侧预览，未覆盖仓库文件`;
+  } catch (error) {
+    msg.className = 'msg err';
+    msg.textContent = error.message || '恢复失败';
+  }
+}
+
+async function deleteBackup(item) {
+  if (!confirm(`确定删除备份 ${item.filename}？`)) return;
+  const msg = $('#backup-msg');
+  try {
+    const d = await backupRequest('delete', {id:item.id});
+    if (!d.ok) throw new Error(d.error || '删除失败');
+    backupList = backupList.filter(backup => backup.id !== item.id);
+    renderBackups();
+    $('#backup-preview').classList.add('hidden');
+    msg.className = 'msg ok';
+    msg.textContent = `✅ 已删除 ${item.filename}`;
+  } catch (error) {
+    msg.className = 'msg err';
+    msg.textContent = error.message || '删除失败';
+  }
+}
+
+/* 表单事��件委托 */
 $('#env-body').addEventListener('click', (e) => {
   const ref = e.target.closest('.uuid-refresh');
   if (ref) {
@@ -564,6 +723,19 @@ function loadObfLib() {
   });
   return obfLibPromise;
 }
+async function createObfuscationBackup(content) {
+  const d = await api('/api/obfuscation-backups', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      action:'create', repo:state.repo, branch:state.branch,
+      file:state.file, content
+    }),
+  });
+  if (!d.ok) throw new Error(d.error || '混淆前备份创建失败');
+  return d.backup;
+}
+
 async function doObfuscate() {
   const msg = $('#obf-msg');
   const code = $('#preview').textContent;   // 混淆对象 = 右侧修改后的完整文件
@@ -576,9 +748,10 @@ async function doObfuscate() {
       const d = await api('/api/obfuscate-python', { method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ code }) });
       if (!d.ok) { msg.className='msg err'; msg.textContent=d.error||'混淆失败'; return; }
+      const backup = await createObfuscationBackup(code);
       $('#obf-output').textContent = d.obfuscated;
       msg.className='msg ok';
-      msg.textContent = `✅ Python 混淆完成: ${d.original_len} → ${d.obfuscated_len} 字符`;
+      msg.textContent = `✅ Python 混淆完成: ${d.original_len} → ${d.obfuscated_len} 字符；已备份 ${backup.filename}`;
     } else if (['js','ts','cjs','mjs'].includes(ext)) {
       // JS 系 -> javascript-obfuscator (前端本地)
       await loadObfLib();
@@ -587,9 +760,10 @@ async function doObfuscate() {
         optionsPreset: preset,
         compact: true,
       }).getObfuscatedCode();
+      const backup = await createObfuscationBackup(code);
       $('#obf-output').textContent = result;
       msg.className='msg ok';
-      msg.textContent = `✅ JS 混淆完成: ${code.length} → ${result.length} 字符 (${preset})`;
+      msg.textContent = `✅ JS 混淆完成: ${code.length} → ${result.length} 字符 (${preset})；已备份 ${backup.filename}`;
     } else {
       msg.className='msg err';
       msg.textContent = `暂不支持 .${ext} 文件混淆（支持 .py / .js / .ts 等）`;
@@ -837,9 +1011,11 @@ $('#btn-repo-add').onclick = () => { repoData.push({name:'', url:'', files:''});
 $('#btn-repo-cancel').onclick = () => $('#repo-modal').classList.add('hidden');
 $('#btn-repo-save').onclick = saveRepoManager;
 
-/* 锁定管理 */
+/* 锁定与备份管理 */
 $('#btn-lock-manage').onclick = openLocks;
 $('#btn-lock-close').onclick = () => $('#lock-modal').classList.add('hidden');
+$('#btn-backups').onclick = openBackups;
+$('#btn-backup-close').onclick = () => $('#backup-modal').classList.add('hidden');
 
 /* 初始路由 */
 const initRoute = parseRoute();

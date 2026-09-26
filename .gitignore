@@ -3,3 +3,5 @@ __pycache__/
 repos/
 data/
 UPDATE_BRANCHES_TODO.md
+OBF_BACKUPS_TODO.md
+data/obfuscation_backups/

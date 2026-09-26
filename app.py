@@ -16,10 +16,20 @@ import os
 import re
 import subprocess
 import json
-from datetime import timedelta
+import hashlib
+import tempfile
+import threading
+from contextlib import contextmanager
+
+try:
+    import fcntl
+except ImportError:  # Windows 开发环境回退到进程内锁
+    fcntl = None
+
+from datetime import datetime, timedelta, timezone
 
 from flask import (Flask, request, jsonify, render_template,
-                   session, redirect, url_for)
+                   session, redirect, url_for, Response)
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +38,11 @@ DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
 PANEL_FILE = os.path.join(DATA_DIR, "panel.json")
 LOCK_FILE = os.path.join(DATA_DIR, "locks.json")   # 锁定记录: {"repo|branch": {"文件路径": {"VAR": 值}}}
 REPOS_FILE = os.path.join(DATA_DIR, "repos.json")  # 仓库配置: [{name, url, files}]
+OBFUSCATION_BACKUP_DIR = os.path.join(DATA_DIR, "obfuscation_backups")
+OBFUSCATION_BACKUP_MAX_BYTES = 5 * 1024 * 1024
+OBFUSCATION_BACKUP_LIMIT = 10
+_OBFUSCATION_BACKUP_LOCKS = {}
+_OBFUSCATION_BACKUP_LOCKS_GUARD = threading.Lock()
 DEFAULT_PASSWORD = "admin"
 SESSION_DAYS = 60   # 登录 cookie 有效期: 两个月
 
@@ -632,6 +647,274 @@ def git_show_file(name, branch, rel):
     if rc != 0:
         raise RuntimeError(err.strip() or "git show 失败")
     return out
+
+
+# ==================== 混淆前备份 ====================
+def _validate_backup_target(name, branch, rel):
+    """校验备份所属仓库、分支和源文件路径，不允许路径穿越。"""
+    configured = {item.get("name") for item in load_repos()}
+    if not name or name not in configured:
+        raise ValueError("仓库不存在")
+    if not branch or branch not in list_branches(name):
+        raise ValueError("分支不存在")
+    if not rel or os.path.isabs(rel) or ".." in rel.replace("\\", "/").split("/"):
+        raise ValueError("非法文件路径")
+    root = os.path.realpath(repo_dir(name))
+    if not is_cloned(name):
+        raise ValueError("仓库未初始化")
+    full = os.path.realpath(os.path.join(root, rel))
+    if not full.startswith(root + os.sep):
+        raise ValueError("非法文件路径")
+    if not os.path.isfile(full):
+        raise ValueError("文件不存在")
+    ext = os.path.splitext(rel)[1].lower()
+    if ext not in {".js", ".ts", ".cjs", ".mjs", ".py"}:
+        raise ValueError("不支持该文件类型")
+    return ext
+
+
+def _safe_backup_component(value):
+    value = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
+    value = value.strip("._-")
+    return value[:100] or "unnamed"
+
+
+def _backup_scope_dir(name, branch):
+    scope = hashlib.sha256(f"{name}\0{branch}".encode("utf-8")).hexdigest()
+    return os.path.join(OBFUSCATION_BACKUP_DIR, scope)
+
+
+@contextmanager
+def _backup_scope_lock(scope_dir):
+    """使用进程内锁和文件锁串行化同一仓库/分支的备份操作。"""
+    with _OBFUSCATION_BACKUP_LOCKS_GUARD:
+        process_lock = _OBFUSCATION_BACKUP_LOCKS.setdefault(scope_dir, threading.Lock())
+    with process_lock:
+        os.makedirs(scope_dir, exist_ok=True)
+        lock_path = os.path.join(scope_dir, ".lock")
+        with open(lock_path, "a+b") as lock_handle:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _backup_metadata_path(scope_dir):
+    return os.path.join(scope_dir, "index.json")
+
+
+def _atomic_write(path, data, binary=False):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    mode = "wb" if binary else "w"
+    kwargs = {} if binary else {"encoding": "utf-8"}
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, mode, **kwargs) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _load_backup_index(scope_dir):
+    path = _backup_metadata_path(scope_dir)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _save_backup_index(scope_dir, records):
+    payload = json.dumps(records, ensure_ascii=False, indent=2)
+    _atomic_write(_backup_metadata_path(scope_dir), payload)
+
+
+def _extract_backup_name(content, ext):
+    patterns = []
+    if ext in {".js", ".ts", ".cjs", ".mjs"}:
+        patterns = [
+            r"(?:const|let|var)\s+NAME\s*=\s*(['\"])(.*?)\1",
+            r"process\.env\.NAME\s*\|\|\s*(['\"])(.*?)\1",
+        ]
+    elif ext == ".py":
+        patterns = [
+            r"^\s*NAME\s*=\s*(['\"])(.*?)\1",
+            r"os\.(?:environ\.get|getenv)\(\s*['\"]NAME['\"]\s*,\s*(['\"])(.*?)\1",
+        ]
+    flags = re.MULTILINE
+    for pattern in patterns:
+        match = re.search(pattern, content, flags)
+        if match:
+            name = _safe_backup_component(match.group(2))
+            if name and name != "unnamed":
+                return name
+    return "unnamed"
+
+
+def _beijing_now():
+    return datetime.now(timezone(timedelta(hours=8)))
+
+
+def _public_backup_record(record):
+    return {key: record.get(key) for key in (
+        "id", "filename", "repo", "branch", "file", "created_at",
+        "size", "sha256", "same_as_previous"
+    )}
+
+
+def _find_backup_record(scope_dir, backup_id):
+    if not re.fullmatch(r"[0-9a-f]{32}", str(backup_id or "")):
+        raise ValueError("非法备份 ID")
+    records = _load_backup_index(scope_dir)
+    record = next((item for item in records if item.get("id") == backup_id), None)
+    if not record:
+        raise FileNotFoundError("备份不存在")
+    content_path = os.path.realpath(os.path.join(scope_dir, record.get("storage", "")))
+    scope_real = os.path.realpath(scope_dir)
+    if not content_path.startswith(scope_real + os.sep):
+        raise ValueError("非法备份路径")
+    return records, record, content_path
+
+
+def _create_obfuscation_backup_unlocked(name, branch, rel, content):
+    ext = _validate_backup_target(name, branch, rel)
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("备份内容为空")
+    raw = content.encode("utf-8")
+    if len(raw) > OBFUSCATION_BACKUP_MAX_BYTES:
+        raise ValueError("单份备份不能超过 5MB")
+
+    scope_dir = _backup_scope_dir(name, branch)
+    os.makedirs(scope_dir, exist_ok=True)
+    records = _load_backup_index(scope_dir)
+    digest = hashlib.sha256(raw).hexdigest()
+    now = _beijing_now()
+    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+    base = f"{_extract_backup_name(content, ext)}_{timestamp}"
+    existing = {item.get("filename") for item in records}
+    filename = f"{base}{ext}"
+    sequence = 2
+    while filename in existing:
+        filename = f"{base}_{sequence}{ext}"
+        sequence += 1
+
+    backup_id = os.urandom(16).hex()
+    storage = f"{backup_id}{ext}"
+    content_path = os.path.join(scope_dir, storage)
+    _atomic_write(content_path, raw, binary=True)
+    record = {
+        "id": backup_id,
+        "filename": filename,
+        "storage": storage,
+        "repo": name,
+        "branch": branch,
+        "file": rel,
+        "created_at": now.isoformat(),
+        "size": len(raw),
+        "sha256": digest,
+        "same_as_previous": bool(records and records[0].get("sha256") == digest),
+    }
+    records.insert(0, record)
+    removed = records[OBFUSCATION_BACKUP_LIMIT:]
+    records = records[:OBFUSCATION_BACKUP_LIMIT]
+    try:
+        _save_backup_index(scope_dir, records)
+    except Exception:
+        try:
+            os.unlink(content_path)
+        except OSError:
+            pass
+        raise
+    for old in removed:
+        old_path = os.path.realpath(os.path.join(scope_dir, old.get("storage", "")))
+        if old_path.startswith(os.path.realpath(scope_dir) + os.sep):
+            try:
+                os.unlink(old_path)
+            except OSError:
+                pass
+    return record
+
+
+def _create_obfuscation_backup(name, branch, rel, content):
+    scope_dir = _backup_scope_dir(name, branch)
+    with _backup_scope_lock(scope_dir):
+        return _create_obfuscation_backup_unlocked(name, branch, rel, content)
+
+
+@app.route("/api/obfuscation-backups", methods=["GET", "POST", "DELETE"])
+def api_obfuscation_backups():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("repo", request.args.get("repo", ""))).strip()
+    branch = str(data.get("branch", request.args.get("branch", ""))).strip()
+    rel = str(data.get("file", request.args.get("file", ""))).strip()
+    action = str(data.get("action", request.args.get("action", "list"))).strip().lower()
+    backup_id = str(data.get("id", request.args.get("id", ""))).strip()
+    try:
+        if action == "create":
+            record = _create_obfuscation_backup(name, branch, rel, data.get("content", ""))
+            return jsonify({"ok": True, "backup": _public_backup_record(record)}), 201
+
+        _validate_backup_target(name, branch, rel)
+        scope_dir = _backup_scope_dir(name, branch)
+        if action == "list":
+            records = _load_backup_index(scope_dir)
+            visible = [
+                _public_backup_record(item) for item in records
+                if item.get("repo") == name and item.get("branch") == branch
+            ][:OBFUSCATION_BACKUP_LIMIT]
+            return jsonify({"ok": True, "backups": visible})
+
+        records, record, content_path = _find_backup_record(scope_dir, backup_id)
+        if record.get("repo") != name or record.get("branch") != branch:
+            raise FileNotFoundError("备份不存在")
+        with open(content_path, "rb") as handle:
+            raw = handle.read(OBFUSCATION_BACKUP_MAX_BYTES + 1)
+        if len(raw) > OBFUSCATION_BACKUP_MAX_BYTES:
+            raise ValueError("备份文件超过 5MB")
+        if hashlib.sha256(raw).hexdigest() != record.get("sha256"):
+            raise ValueError("备份校验失败")
+
+        if action in {"view", "restore"}:
+            return jsonify({
+                "ok": True,
+                "backup": _public_backup_record(record),
+                "content": raw.decode("utf-8"),
+            })
+        if action == "download":
+            return Response(
+                raw,
+                mimetype="text/plain; charset=utf-8",
+                headers={
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{record['filename']}"
+                },
+            )
+        if action == "delete" or request.method == "DELETE":
+            remaining = [item for item in records if item.get("id") != backup_id]
+            _save_backup_index(scope_dir, remaining)
+            try:
+                os.unlink(content_path)
+            except OSError:
+                pass
+            return jsonify({"ok": True, "deleted": backup_id})
+        return jsonify({"ok": False, "error": "不支持的操作"}), 400
+    except FileNotFoundError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 404
+    except (UnicodeDecodeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("混淆备份操作失败")
+        return jsonify({"ok": False, "error": "备份操作失败"}), 500
 
 
 # ==================== API ====================
