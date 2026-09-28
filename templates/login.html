@@ -5,18 +5,56 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>登录 - 节点仓库配置面板</title>
 <style>
-  :root { --bg:#0f1115; --card:#1a1e26; --border:#2c3444; --text:#e6e9ef; --muted:#8b94a7; --accent:#4c8dff; --err:#f85149; }
+  :root {
+    --bg:#f7f6f4;            /* 极浅暖灰背景 */
+    --surface:#ffffff;        /* 卡片表面 */
+    --surface-2:#f1efec;      /* 次级表面/输入 */
+    --border:#e5e2dc;         /* 分隔线 */
+    --border-strong:#d4d0c7;  /* 输入框/强调分隔 */
+    --text:#1c1b19;           /* 主文字 */
+    --text-2:#6f6a62;         /* 次级文字 */
+    --text-3:#a39e95;         /* 弱文字 */
+    --accent:#2f5d50;         /* 深墨绿强调 */
+    --accent-soft:#e8f0ec;
+    --err:#b3423a;            /* 错误 */
+    --shadow:0 1px 2px rgba(28,27,25,.04),0 20px 48px -28px rgba(28,27,25,.22);
+    --radius:16px;
+    --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+  }
   * { box-sizing:border-box; margin:0; padding:0; }
-  body { background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; min-height:100vh; display:flex; align-items:center; justify-content:center; }
-  .box { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:36px 32px; width:340px; }
-  .box h1 { font-size:18px; margin-bottom:6px; text-align:center; }
-  .box .sub { color:var(--muted); font-size:13px; text-align:center; margin-bottom:24px; }
-  .box input[type=password] { width:100%; background:#0d1016; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:11px 12px; font-size:15px; outline:none; }
-  .box input[type=password]:focus { border-color:var(--accent); }
-  .box button { width:100%; background:var(--accent); border:none; border-radius:8px; padding:11px; margin-top:14px; color:#fff; font-size:15px; font-weight:600; cursor:pointer; }
-  .box button:hover { filter:brightness(1.1); }
-  .err { color:var(--err); font-size:13px; margin-top:10px; text-align:center; }
-  .tip { color:var(--muted); font-size:12px; margin-top:14px; text-align:center; }
+  body {
+    background:var(--bg); color:var(--text);
+    font-family:var(--font-sans);
+    min-height:100vh; display:flex; align-items:center; justify-content:center;
+    -webkit-font-smoothing:antialiased; font-size:14px;
+    padding:24px;
+  }
+  .box { width:340px; }
+  .box h1 { font-size:20px; font-weight:600; letter-spacing:-.01em; text-align:center; margin-bottom:4px; }
+  .box .sub { color:var(--text-2); font-size:13px; text-align:center; margin-bottom:26px; }
+  form {
+    background:var(--surface);
+    border:1px solid var(--border-strong);
+    border-radius:var(--radius);
+    box-shadow:var(--shadow);
+    padding:26px;
+    display:flex; flex-direction:column; gap:14px;
+  }
+  .box input[type=password] {
+    width:100%; background:var(--surface); color:var(--text);
+    border:1px solid var(--border-strong); border-radius:9px;
+    padding:12px 13px; font-size:15px; outline:none;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  .box input[type=password]:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  .box button {
+    width:100%; background:var(--text); color:#fff; border:none; border-radius:9px;
+    padding:12px; font-size:14px; font-weight:500; cursor:pointer;
+    transition:background .15s;
+  }
+  .box button:hover { background:#33312d; }
+  .err { color:var(--err); font-size:13px; text-align:center; }
+  .tip { color:var(--text-3); font-size:12px; text-align:center; margin-top:18px; }
 </style>
 </head>
 <body>
