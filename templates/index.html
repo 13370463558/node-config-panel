@@ -31,8 +31,9 @@
   header .sub { color:var(--text-2); font-size:13px; }
   button { background:var(--surface); color:var(--text-2); border:1px solid var(--border-strong); border-radius:9px; padding:8px 16px; cursor:pointer; font-size:14px; transition:background .15s,color .15s,border-color .15s; }
   button:hover { color:var(--text); border-color:var(--text-3); background:var(--surface-2); }
-  button.primary { background:var(--text); border-color:var(--text); color:#fff; font-weight:500; }
-  button.primary:hover { background:#33312d; border-color:#33312d; color:#fff; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:500; }
+  button.primary:hover { background:#274c42; border-color:#274c42; color:#fff; }
+  button.primary:disabled { background:var(--border-strong); border-color:var(--border-strong); color:#fff; opacity:.6; }
   button.danger:hover { border-color:var(--err); color:var(--err); background:#fdf0ee; }
   button:disabled { opacity:.35; cursor:not-allowed; }
   select, input[type=text] { background:var(--surface); color:var(--text); border:1px solid var(--border-strong); border-radius:9px; padding:8px 10px; font-size:14px; outline:none; transition:border-color .15s,box-shadow .15s; }
